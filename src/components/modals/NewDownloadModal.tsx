@@ -47,6 +47,7 @@ function NewDownloadModal({
   const [endTime, setEndTime] = useState("")
   const [formats, setFormats] = useState<DetailedFormat[]>([]) // State holds the detailed list
   const [selectedFormat, setSelectedFormat] = useState<string>("") // State holds the selected format ID(s) string
+  const [selectedOutputFormat, setSelectedOutputFormat] = useState<string>("") // New state for output format
   const [isFetchingFormats, setIsFetchingFormats] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [fetchError, setFetchError] = useState<string | null>(null)
@@ -61,6 +62,7 @@ function NewDownloadModal({
       setEndTime("")
       setFormats([])
       setSelectedFormat("")
+      setSelectedOutputFormat("") // Reset output format
       setIsFetchingFormats(false)
       setIsDownloading(false)
       setFetchError(null)
@@ -189,9 +191,15 @@ function NewDownloadModal({
     setIsDownloading(true)
     setFetchError(null)
 
+    // Find the selected format details
+    const selectedFormatDetails = formats.find((f) => f.id === selectedFormat)
+
     const options: DownloadOptions = {
       url: url,
       formatCode: selectedFormat, // Pass the selected format ID(s) string
+      outputFormat: selectedOutputFormat || undefined, // Pass the selected output format
+      hasVideo: selectedFormatDetails?.hasVideo, // Pass hasVideo
+      hasAudio: selectedFormatDetails?.hasAudio, // Pass hasAudio
       startTime: startTime.trim() || undefined,
       endTime: endTime.trim() || undefined,
     }
@@ -199,7 +207,9 @@ function NewDownloadModal({
     try {
       if (!window.electronAPI) throw new Error("Backend API is not available.")
       console.log("Modal: Sending download request:", options)
-      const result = await window.electronAPI.downloadVideo(options)
+      const result = (await window.electronAPI.downloadVideo(
+        options
+      )) as DownloadResult // Cast to DownloadResult
       console.log("Modal: Download request response:", result)
       if (result.success) {
         toast({
@@ -411,6 +421,36 @@ function NewDownloadModal({
                 <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               )}
             </div>
+          </div>
+
+          {/* Output Format Select */}
+          <div className="space-y-1.5">
+            <Label htmlFor="output-format">Output Format</Label>
+            <Select
+              value={selectedOutputFormat}
+              onValueChange={setSelectedOutputFormat}
+              disabled={
+                !dependenciesOk ||
+                isFetchingFormats ||
+                isDownloading ||
+                formats.length === 0
+              }
+            >
+              <SelectTrigger id="output-format" className="flex-1 truncate">
+                <SelectValue placeholder="Select output format...">
+                  {selectedOutputFormat || "Select output format..."}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {/* Basic list of common formats */}
+                <SelectItem value="mp4">MP4 (Video)</SelectItem>
+                <SelectItem value="mkv">MKV (Video)</SelectItem>
+                <SelectItem value="webm">WebM (Video)</SelectItem>
+                <SelectItem value="mp3">MP3 (Audio)</SelectItem>
+                <SelectItem value="aac">AAC (Audio)</SelectItem>
+                <SelectItem value="opus">Opus (Audio)</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Error/Warning Display */}

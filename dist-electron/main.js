@@ -584,16 +584,30 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
         "--encoding",
         "utf-8",
         "-o",
-        path.join(targetDir, "%(title)s [%(id)s].%(ext)s"),
+        path.join(targetDir, "%(title)s [%(id)s].%(ext)s"), // Use %(ext)s for recoded extension
         "--no-continue",
         "--no-overwrites",
     ];
     if (needsFfmpeg && dependenciesStatus.ffmpegOk)
         args.push("--ffmpeg-location", dependenciesStatus.ffmpegPath);
+    // Add format code argument
     if (options.formatCode && options.formatCode !== "bestvideo+bestaudio/best")
         args.push("-f", options.formatCode);
     else
-        args.push("-f", "bestvideo+bestaudio/best");
+        args.push("-f", "bestvideo+bestaudio/best"); // Default to best
+    // Add output format argument if provided, using hasVideo/hasAudio to determine method
+    if (options.outputFormat) {
+        if (options.hasVideo) {
+            // If the selected format has video, use --recode-video
+            args.push("--recode-video", options.outputFormat);
+        }
+        else if (options.hasAudio) {
+            // If the selected format is audio-only, use -x --audio-format
+            args.push("-x", "--audio-format", options.outputFormat);
+        }
+        // If neither hasVideo nor hasAudio (shouldn't happen with valid formats),
+        // we don't add any recoding/extraction arguments.
+    }
     if (options.startTime || options.endTime) {
         args.push("--download-sections", `*${options.startTime || ""}-${options.endTime || ""}`);
         args.push("--force-keyframes-at-cuts");

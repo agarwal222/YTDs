@@ -36,6 +36,9 @@ export interface DetailedFormat {
 export interface DownloadOptions {
   url: string
   formatCode?: string
+  outputFormat?: string // Added output format
+  hasVideo?: boolean // Added hasVideo
+  hasAudio?: boolean // Added hasAudio
   startTime?: string
   endTime?: string
 }
