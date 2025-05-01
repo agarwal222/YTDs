@@ -1,0 +1,25 @@
+// electron/tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2021", // Target modern JS for Node/Electron
+    "module": "CommonJS", // CRITICAL for Electron main/preload
+    "outDir": "../dist-electron", // Output compiled JS outside 'electron' folder
+    "sourceMap": true, // Enable source maps for debugging
+    "moduleResolution": "Node", // Use Node.js module resolution
+    "baseUrl": ".", // Base directory is the 'electron' folder
+    "esModuleInterop": true, // Help with CJS/ESM interop
+    "resolveJsonModule": true, // Allow importing JSON
+    "strict": true, // Enable strict type checking
+    "forceConsistentCasingInFileNames": true, // Avoid casing issues
+    "skipLibCheck": true, // Speed up compilation
+    "lib": ["ES2021"], // Node/ES environment, NO DOM
+    "rootDir": "." // Source files are in this directory
+  },
+  "include": [
+    "main.ts", // Compile main.ts
+    "preload.ts" // Compile preload.ts
+  ],
+  "exclude": [
+    "node_modules" // Standard exclusion
+  ]
+}
