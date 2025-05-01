@@ -1,4 +1,5 @@
 // src/components/DownloadList.tsx
+import { JSX } from "react"
 import { cn } from "@/lib/utils" // For conditional classes
 import { Progress } from "@/components/ui/progress" // Shadcn Progress bar
 import { Button } from "@/components/ui/button" // Shadcn Button
@@ -194,7 +195,7 @@ function DownloadList({
                         {canInteractWithPath && ( // Show Open Folder only if completed and file exists
                           <Button
                             variant="ghost"
-                            size="xs-icon"
+                            size="icon"
                             onClick={(e) => {
                               e.stopPropagation()
                               onOpenFolder(item.path)
@@ -207,7 +208,7 @@ function DownloadList({
                         {canInteractWithPath && ( // Show Copy Path only if completed and file exists
                           <Button
                             variant="ghost"
-                            size="xs-icon"
+                            size="icon"
                             onClick={(e) => {
                               e.stopPropagation()
                               copyPath(item.path)
@@ -220,7 +221,7 @@ function DownloadList({
                         {isError && ( // Show Retry only on error
                           <Button
                             variant="ghost"
-                            size="xs-icon"
+                            size="icon"
                             onClick={(e) => {
                               e.stopPropagation()
                               onRetry(item)
@@ -233,7 +234,7 @@ function DownloadList({
                         {/* Always show Remove button */}
                         <Button
                           variant="ghost"
-                          size="xs-icon"
+                          size="icon"
                           className="text-muted-foreground hover:text-destructive"
                           onClick={(e) => {
                             e.stopPropagation()

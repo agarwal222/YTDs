@@ -4,17 +4,17 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 // electron/main.ts
-const electron_1 = require("electron"); // Added shell, clipboard; Removed protocol
+const electron_1 = require("electron");
 const path = require("node:path");
 const electron_store_1 = __importDefault(require("electron-store")); // Using v8.2.0 via package.json
-const node_child_process_1 = require("node:child_process"); // Use spawn
-const fs = require("node:fs"); // Import fs
+const node_child_process_1 = require("node:child_process");
+const fs = require("node:fs");
 // --- Constants ---
 const YTD_SUBFOLDER = "YTDs"; // Name for the dedicated download subfolder
 // --- Store Initialization ---
 const store = new electron_store_1.default({});
 // --- Global State ---
-let win;
+let win = null;
 let dependenciesStatus = {
     ytDlpOk: false,
     ffmpegOk: false,
@@ -35,7 +35,6 @@ async function checkCommand(commandOrPath, name) {
     let effectivePath = commandOrPath;
     let checkViaPath = false;
     const versionArg = name === "ffmpeg" ? "-version" : "--version";
-    // console.log(`Checking dependency: ${name} with input path: ${commandOrPath || '(empty, checking PATH)'}`); // Verbose log
     if (commandOrPath &&
         (path.isAbsolute(commandOrPath) || commandOrPath.includes(path.sep))) {
         try {
@@ -69,8 +68,9 @@ async function checkCommand(commandOrPath, name) {
     }
     return new Promise((resolve) => {
         try {
-            // console.log(`[DepCheck-${name}] Spawning: "${effectivePath}" ${versionArg}`); // Verbose log
-            const proc = (0, node_child_process_1.spawn)(effectivePath, [versionArg]);
+            const proc = (0, node_child_process_1.spawn)(effectivePath, [versionArg], {
+                shell: process.platform === "win32",
+            });
             let out = "";
             let errOut = "";
             proc.stdout.on("data", (d) => (out += d.toString()));
@@ -83,7 +83,7 @@ async function checkCommand(commandOrPath, name) {
                     pathUsed: effectivePath,
                     errorMsg: ok
                         ? undefined
-                        : `Exit Code ${code}. Stderr: ${errOut.trim()}`,
+                        : `Exit Code ${code}. Stderr: ${errOut.trim() || "(none)"}`,
                 });
             });
             proc.on("error", (err) => resolve({
@@ -123,42 +123,47 @@ async function checkAndStoreDependencies() {
     if (win)
         win.webContents.send("dependencies-status-update", dependenciesStatus);
     const ok = dependenciesStatus.ytDlpOk && dependenciesStatus.ffmpegOk;
-    if (!ok) {
-        if (win) {
-            let missing = [];
-            if (!dependenciesStatus.ytDlpOk)
-                missing.push("yt-dlp");
-            if (!dependenciesStatus.ffmpegOk)
-                missing.push("ffmpeg");
-            electron_1.dialog
-                .showMessageBox(win, {
-                type: "warning",
-                title: "Deps Missing",
-                message: `Cannot find/execute: ${missing.join(" & ")}. Check PATH or Settings.`,
-                buttons: ["OK", "Instructions"],
-            })
-                .then((r) => {
-                if (r.response === 1) {
-                    // TODO: Add actual URLs for instructions
-                    electron_1.shell.openExternal("https://github.com/yt-dlp/yt-dlp#installation"); // Placeholder URL
-                    electron_1.shell.openExternal("https://ffmpeg.org/download.html"); // Placeholder URL
+    if (!ok && win) {
+        let missing = [];
+        if (!dependenciesStatus.ytDlpOk)
+            missing.push("yt-dlp");
+        if (!dependenciesStatus.ffmpegOk)
+            missing.push("ffmpeg");
+        electron_1.dialog
+            .showMessageBox(win, {
+            type: "warning",
+            title: "Deps Missing",
+            message: `Cannot find/execute: ${missing.join(" & ")}. Check PATH or Settings.`,
+            buttons: ["OK", "Instructions"],
+        })
+            .then((r) => {
+            if (r.response === 1) {
+                try {
+                    electron_1.shell.openExternal("https://github.com/yt-dlp/yt-dlp#installation");
+                    electron_1.shell.openExternal("https://ffmpeg.org/download.html");
                 }
-            });
-        }
+                catch (e) {
+                    console.error("Failed to open external links", e);
+                }
+            }
+        });
+    }
+    else if (ok) {
+        console.log("Dependencies verified.");
     }
     return ok;
 }
 function parseAndCombineFormats(formats) {
-    // ... (Keep the full implementation from previous responses - this parses yt-dlp -J output) ...
     const results = [];
-    if (!Array.isArray(formats))
+    if (!Array.isArray(formats)) {
         return results;
+    }
     const bestAudio = formats
-        .filter((f) => f.format_id && f.vcodec === "none" && f.acodec !== "none" && f.abr)
+        .filter((f) => f?.format_id && f.vcodec === "none" && f.acodec !== "none" && f.abr)
         .sort((a, b) => (b.preference ?? -99) - (a.preference ?? -99) ||
         (b.abr ?? 0) - (a.abr ?? 0))[0];
     const bestVideoOnly = formats
-        .filter((f) => f.format_id && f.vcodec !== "none" && f.acodec === "none" && f.height)
+        .filter((f) => f?.format_id && f.vcodec !== "none" && f.acodec === "none" && f.height)
         .sort((a, b) => (b.preference ?? -99) - (a.preference ?? -99) ||
         (b.height ?? 0) - (a.height ?? 0) ||
         (b.fps ?? 0) - (a.fps ?? 0) ||
@@ -175,7 +180,7 @@ function parseAndCombineFormats(formats) {
     });
     const addedDirectResolutions = new Set();
     formats
-        .filter((f) => f.format_id &&
+        .filter((f) => f?.format_id &&
         f.vcodec !== "none" &&
         f.acodec !== "none" &&
         f.resolution &&
@@ -215,7 +220,7 @@ function parseAndCombineFormats(formats) {
     });
     if (bestAudioId && bestVideoOnly) {
         formats
-            .filter((f) => f.format_id &&
+            .filter((f) => f?.format_id &&
             f.vcodec !== "none" &&
             f.acodec === "none" &&
             f.height &&
@@ -233,25 +238,34 @@ function parseAndCombineFormats(formats) {
                 lParts.push(f.vcodec.split(".")[0]);
             lParts.push(`+ Audio`);
             lParts.push(`(${f.ext.toUpperCase()}+${bestAudioExt.toUpperCase()})`);
-            let cSize;
-            if (f.filesize_approx && bestAudio?.filesize_approx) {
-                cSize = f.filesize_approx + bestAudio.filesize_approx;
-                lParts.push(`~${(cSize / (1024 * 1024)).toFixed(1)}MB`);
+            let combinedSize = undefined; // Initialize
+            if (f.filesize_approx != null && bestAudio?.filesize_approx != null) {
+                combinedSize = f.filesize_approx + bestAudio.filesize_approx;
+                combinedSize !== undefined &&
+                    lParts.push(`~${(combinedSize / (1024 * 1024)).toFixed(1)}MB`);
             }
-            else if (f.vbr && bestAudio?.abr) {
+            else if (f.vbr != null && bestAudio?.abr != null) {
                 lParts.push(`~${Math.round(f.vbr + bestAudio.abr)}k`);
             }
-            else if (f.tbr && bestAudio?.abr) {
+            else if (f.tbr != null && bestAudio?.abr != null) {
                 lParts.push(`~${Math.round(f.tbr + bestAudio.abr)}k`);
             }
+            // --- FIX for TS18048: Assign calculated or undefined ---
             results.push({
                 id: cId,
                 label: lParts.join(" "),
-                // sizeMb: cSize ? parseFloat((cSize / (1024 * 1024)).toFixed(1)) : undefined, // Handle undefined cSize
-                isCombined: true, // NOTE: isCombined is also not in DetailedFormat, consider removing or adding to type
+                group: "Video+Audio (Combined)",
+                hasVideo: true,
+                hasAudio: true,
+                resolution: f.resolution,
+                fps: f.fps,
                 vcodec: f.vcodec,
-                acodec: bestAudio?.acodec,
-                ext: f.ext, // Keep video ext for combined
+                acodec: bestAudioCodec,
+                container: `${f.ext}+${bestAudioExt}`,
+                tbr: undefined,
+                abr: bestAudio?.abr,
+                vbr: f.vbr ?? f.tbr,
+                filesize: combinedSize,
             });
             addedDirectResolutions.add(qKey);
         });
@@ -284,18 +298,18 @@ function parseAndCombineFormats(formats) {
             "Video+Audio (Combined)": 2,
             "Audio Only": 3,
         };
-        if (groupOrder[a.group] !== groupOrder[b.group]) {
+        if (groupOrder[a.group] !== groupOrder[b.group])
             return groupOrder[a.group] - groupOrder[b.group];
-        }
-        const qA = (a.hasVideo
-            ? (a.resolution ? parseInt(a.resolution.split("x")[1]) : 0) *
+        // --- FIX for TS2304: Calculate quality inside callback ---
+        const qualityA = (a.hasVideo
+            ? (a.resolution ? parseInt(a.resolution.split("x")[1], 10) : 0) *
                 (a.fps ?? 30)
             : 0) + (a.abr ?? a.tbr ?? 0);
-        const qB = (b.hasVideo
-            ? (b.resolution ? parseInt(b.resolution.split("x")[1]) : 0) *
+        const qualityB = (b.hasVideo
+            ? (b.resolution ? parseInt(b.resolution.split("x")[1], 10) : 0) *
                 (b.fps ?? 30)
             : 0) + (b.abr ?? b.tbr ?? 0);
-        return qB - qA;
+        return qualityB - qualityA; // Descending quality
     });
     return results;
 }
@@ -304,7 +318,7 @@ function parseAndCombineFormats(formats) {
 // ==================================
 function createWindow() {
     const publicPath = process.env.VITE_PUBLIC ?? "";
-    const iconPath = path.join(publicPath, "electron-vite.svg"); // Ensure this icon exists in /public
+    const iconPath = path.join(publicPath, "electron-vite.svg");
     win = new electron_1.BrowserWindow({
         width: 1024,
         height: 768,
@@ -318,10 +332,8 @@ function createWindow() {
     });
     win.webContents.on("did-finish-load", () => {
         win?.webContents.send("main-process-message", `Backend loaded: ${new Date().toLocaleString()}`);
-        if (dependenciesStatus.checked && win) {
-            // Send initial status if check completed before window loaded
+        if (dependenciesStatus.checked && win)
             win.webContents.send("dependencies-status-update", dependenciesStatus);
-        }
     });
     if (VITE_DEV_SERVER_URL) {
         win.loadURL(VITE_DEV_SERVER_URL);
@@ -334,7 +346,6 @@ function createWindow() {
         win = null;
     });
 }
-// app.disableHardwareAcceleration(); // Uncomment only if troubleshooting video playback later
 electron_1.app.on("window-all-closed", () => {
     if (process.platform !== "darwin")
         electron_1.app.quit();
@@ -344,9 +355,7 @@ electron_1.app.on("activate", () => {
         createWindow();
 });
 electron_1.app.whenReady().then(() => {
-    // --- REMOVED protocol registration ---
     createWindow();
-    // Initial dependency check after window is created
     setTimeout(checkAndStoreDependencies, 1500);
 });
 // ==================================
@@ -389,16 +398,32 @@ electron_1.ipcMain.handle("settings:select-executable-path", async (_e, name) =>
 // --- Dependencies ---
 electron_1.ipcMain.handle("app:check-dependencies", async () => await checkAndStoreDependencies());
 electron_1.ipcMain.handle("app:get-dependencies-status", () => dependenciesStatus);
-// --- Downloads ---
+// --- Downloads: Get List ---
 electron_1.ipcMain.handle("downloads:get-list", () => {
     try {
-        const h = store.get("downloadHistory", []);
-        return h
-            .filter((i) => i.status !== "completed" || !i.path || fs.existsSync(i.path))
-            .map((i) => ({
-            ...i,
-            fileExists: i.status === "completed" && !!i.path && fs.existsSync(i.path),
-        }));
+        const history = store.get("downloadHistory", []);
+        // Map first to add fileExists status
+        const historyWithCheck = history.map((item) => {
+            let exists = false;
+            if (item.status === "completed" && item.path) {
+                try {
+                    exists = fs.existsSync(item.path);
+                }
+                catch (err) {
+                    console.error(`[GetList] Error checking file ${item.path}:`, err);
+                    exists = false;
+                }
+            }
+            return { ...item, fileExists: !!exists }; // Ensure boolean
+        });
+        // Now filter out completed items where the file doesn't exist
+        return historyWithCheck.filter((item) => {
+            // Type item here too
+            if (item.status === "completed" && !item.fileExists) {
+                return false; // Filter out
+            }
+            return true; // Keep others
+        });
     }
     catch (e) {
         console.error("Error in get-list:", e);
@@ -410,7 +435,7 @@ electron_1.ipcMain.handle("downloads:open-folder", async (_e, filePath) => {
         return false;
     try {
         if (!fs.existsSync(filePath)) {
-            electron_1.dialog.showErrorBox("Error", `File/Folder not found:\n${filePath}`);
+            electron_1.dialog.showErrorBox("Error", `Path not found:\n${filePath}`);
             return false;
         }
         electron_1.shell.showItemInFolder(path.normalize(filePath));
@@ -462,13 +487,7 @@ electron_1.ipcMain.handle("downloads:retry", async (event, itemId) => {
         if (!item)
             return { success: false, message: "Item not found." };
         console.log(`Retrying download for ${item.url}`);
-        // Pass only event and the necessary options for download
-        // NOTE: The handle itself is defined elsewhere, this calls that handle.
-        // The target handle 'yt:download' expects (event, options), so we pass event and options.
-        return await electron_1.ipcMain.handle("yt:download", event, {
-            url: item.url,
-            formatId: item.formatId, // Pass original format if available
-        });
+        return await electron_1.ipcMain.handle("yt:download", event, { url: item.url });
     }
     catch (e) {
         return { success: false, message: `Retry error: ${e.message}` };
@@ -482,7 +501,9 @@ electron_1.ipcMain.handle("yt:fetch-formats", async (_e, url) => {
         throw new Error("yt-dlp invalid/missing.");
     return new Promise((resolve, reject) => {
         const args = ["-J", url];
-        const proc = (0, node_child_process_1.spawn)(dependenciesStatus.ytDlpPath, args);
+        const proc = (0, node_child_process_1.spawn)(dependenciesStatus.ytDlpPath, args, {
+            windowsHide: true,
+        });
         let json = "";
         let err = "";
         proc.stdout.on("data", (d) => (json += d));
@@ -507,61 +528,85 @@ electron_1.ipcMain.handle("yt:fetch-formats", async (_e, url) => {
         proc.on("error", (e) => reject(e));
     });
 });
-electron_1.ipcMain.handle("yt:download", async (event, options) => {
+electron_1.ipcMain.handle("yt:download", async (_event, options) => {
     if (!dependenciesStatus.checked)
         await checkAndStoreDependencies();
+    let missingDeps = [];
     if (!dependenciesStatus.ytDlpOk)
-        return { success: false, message: "yt-dlp invalid/missing." };
-    if (!dependenciesStatus.ffmpegOk)
-        return { success: false, message: "ffmpeg invalid/missing." };
-    const { url } = options;
-    if (!url)
-        return { success: false, message: "Missing URL." };
-    const videoId = crypto.randomUUID(); // Generate unique ID
-    const eventSender = event.sender; // Get sender for progress updates
+        missingDeps.push("yt-dlp");
+    const needsFfmpeg = options.startTime ||
+        options.endTime ||
+        options.formatCode?.includes("+") ||
+        options.formatCode === "bestvideo+bestaudio/best" ||
+        !options.formatCode;
+    if (needsFfmpeg && !dependenciesStatus.ffmpegOk)
+        missingDeps.push("ffmpeg");
+    if (missingDeps.length > 0) {
+        const m = missingDeps.join(",");
+        electron_1.dialog.showErrorBox("Deps Error", `Cannot download: ${m} missing.`);
+        return { success: false, message: `Missing: ${m}` };
+    }
+    const baseDir = store.get("downloadPath", electron_1.app.getPath("downloads"));
+    const targetDir = path.join(baseDir, YTD_SUBFOLDER);
+    const videoId = options.url.split("v=")[1]?.split("&")[0] || `vid_${Date.now()}`;
+    const eventSender = _event.sender;
     try {
-        // --- Create and store initial download item FIRST ---
-        const newItem = {
+        fs.mkdirSync(targetDir, { recursive: true });
+    }
+    catch (e) {
+        electron_1.dialog.showErrorBox("Dir Error", `Cannot create ${targetDir}: ${e.message}`);
+        return { success: false, message: `Dir Error: ${e.message}` };
+    }
+    try {
+        const h = store.get("downloadHistory", []);
+        const pItem = {
             id: videoId,
-            title: "Fetching title...", // Placeholder title
-            path: "", // Will be determined
+            title: `Pending: ${options.url.substring(0, 60)}...`,
+            path: "",
             status: "pending",
-            url,
+            url: options.url,
+            progress: 0,
             timestamp: Date.now(),
-            formatId: options.formatId, // Save formatId
         };
-        updateHistory(newItem);
-        win?.webContents.send("downloads:updated"); // Notify UI immediately
-        // --- End of initial item creation ---
-        // --- Now, prepare and start the actual download process ---
-        const downloadDir = path.join(store.get("downloadPath", electron_1.app.getPath("downloads")), YTD_SUBFOLDER);
-        try {
-            if (!fs.existsSync(downloadDir))
-                fs.mkdirSync(downloadDir, { recursive: true });
-        }
-        catch (e) {
-            return { success: false, message: `Failed create dir: ${e.message}` };
-        }
-        const args = [
-            "--progress-template",
-            "progress:%(progress.eta)s", // Simple progress reporting
-            "--newline",
-            "-o",
-            path.join(downloadDir, "%(title)s [%(id)s].%(ext)s"),
-            "--ffmpeg-location",
-            dependenciesStatus.ffmpegPath,
-        ];
-        if (options.formatId)
-            args.push("-f", options.formatId);
-        args.push(url);
-        console.log(`[DL ${videoId}] Spawning: ${dependenciesStatus.ytDlpPath} ${args.join(" ")}`);
-        const proc = (0, node_child_process_1.spawn)(dependenciesStatus.ytDlpPath, args);
-        let stdout = "";
-        let stderr = "";
-        let finalPath = "";
-        let title = "";
+        store.set("downloadHistory", [
+            ...h.filter((i) => i.id !== videoId),
+            pItem,
+        ]);
+        eventSender.send("downloads:updated");
+    }
+    catch (e) {
+        console.error(`Error setting pending state for ${videoId}:`, e);
+    }
+    const args = [
+        "--progress",
+        "--progress-template",
+        "progress:%(progress._percent_str)s",
+        "--encoding",
+        "utf-8",
+        "-o",
+        path.join(targetDir, "%(title)s [%(id)s].%(ext)s"),
+        "--no-continue",
+        "--no-overwrites",
+    ];
+    if (needsFfmpeg && dependenciesStatus.ffmpegOk)
+        args.push("--ffmpeg-location", dependenciesStatus.ffmpegPath);
+    if (options.formatCode && options.formatCode !== "bestvideo+bestaudio/best")
+        args.push("-f", options.formatCode);
+    else
+        args.push("-f", "bestvideo+bestaudio/best");
+    if (options.startTime || options.endTime) {
+        args.push("--download-sections", `*${options.startTime || ""}-${options.endTime || ""}`);
+        args.push("--force-keyframes-at-cuts");
+    }
+    args.push(options.url);
+    console.log(`[Download ${videoId}] Spawning: "${dependenciesStatus.ytDlpPath}"`, args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" "));
+    try {
+        const proc = (0, node_child_process_1.spawn)(dependenciesStatus.ytDlpPath, args, {
+            windowsHide: true,
+        });
+        let stdout = "", stderr = "", title = `DL ${videoId}`, finalPath = "";
         proc.stdout.on("data", (d) => {
-            stdout += d.toString();
+            stdout += d;
             let nl;
             while ((nl = stdout.indexOf("\n")) >= 0) {
                 const l = stdout.substring(0, nl).trim();
@@ -594,7 +639,7 @@ electron_1.ipcMain.handle("yt:download", async (event, options) => {
                     console.log(`[DL ${videoId}] Detected Path: ${finalPath}, Title: ${title}`);
                     try {
                         const h = store.get("downloadHistory", []);
-                        store.set("downloadHistory", h.map((i) => (i.id === videoId ? { ...i, title } : i)));
+                        store.set("downloadHistory", h.map((i) => i.id === videoId ? { ...i, title } : i));
                     }
                     catch (e) { }
                 }
@@ -609,16 +654,18 @@ electron_1.ipcMain.handle("yt:download", async (event, options) => {
         });
         proc.on("close", (code) => {
             console.log(`[close ${videoId}] Code: ${code}`);
-            let exists = false; // Ensure type is boolean
+            let exists = false;
             try {
-                exists = !!(finalPath && fs.existsSync(finalPath)); // Ensure boolean assignment
+                exists = !!finalPath && fs.existsSync(finalPath);
             }
-            catch { }
+            catch (e) {
+                console.error(`Error checking existence for ${finalPath}:`, e);
+            }
             const status = code === 0 && exists ? "completed" : "error";
             let eInfo = code !== 0
                 ? stderr.trim() || `Exit Code ${code}`
                 : !exists
-                    ? `File missing: ${finalPath || "(path not detected)"}`
+                    ? `File missing/undetected: ${finalPath || "(path unknown)"}`
                     : undefined;
             if (code === 0 && !finalPath)
                 eInfo = "Completed, path undetected.";
@@ -636,21 +683,29 @@ electron_1.ipcMain.handle("yt:download", async (event, options) => {
                     progress: status === "completed" ? 100 : undefined,
                     timestamp: Date.now(),
                     errorInfo: eInfo,
-                    formatId: options.formatId // Keep formatId on final item
                 };
-                const fH = h.map((i) => (i.id === videoId ? fItem : i));
-                if (!fH.some((i) => i.id === videoId))
-                    fH.push(fItem); // Should not happen if newItem was added
+                let updated = false;
+                const fH = h.map((i) => {
+                    if (i.id === videoId) {
+                        updated = true;
+                        return fItem;
+                    }
+                    return i;
+                });
+                if (!updated)
+                    fH.push(fItem);
                 store.set("downloadHistory", fH);
                 eventSender.send("downloads:updated");
+                console.log(`[Download ${videoId}] Final status (${status}) update sent.`);
             }
             catch (e) {
                 console.error(`Error finalizing status for ${videoId}:`, e);
             }
         });
+        // --- FIX for TS2554/TS7006 in error handler ---
         proc.on("error", (err) => {
             console.error(`[spawn error ${videoId}]:`, err);
-            const eInfo = `Spawn failed: ${err.message}`;
+            const errorInfo = `Spawn failed: ${err.message}`;
             try {
                 const h = store.get("downloadHistory", []);
                 const fItem = {
@@ -660,18 +715,26 @@ electron_1.ipcMain.handle("yt:download", async (event, options) => {
                     url: options.url,
                     status: "error",
                     timestamp: Date.now(),
-                    errorInfo: eInfo,
-                    formatId: options.formatId // Keep formatId on error item
+                    errorInfo,
                 };
-                const fH = h.map((i) => (i.id === videoId ? fItem : i));
+                let updated = false;
+                // Explicitly type 'i' in map and some
+                const fH = h.map((i) => {
+                    if (i.id === videoId) {
+                        updated = true;
+                        return fItem;
+                    }
+                    return i;
+                });
                 if (!fH.some((i) => i.id === videoId))
                     fH.push(fItem);
                 store.set("downloadHistory", fH);
                 eventSender.send("downloads:updated");
             }
-            catch (e) { }
+            catch (e) {
+                console.error(`Error updating store on spawn failure for ${videoId}:`, e);
+            }
         });
-        // Return success *after* creating the pending item and *before* spawn finishes
         return {
             success: true,
             message: "Download process initiated.",
@@ -679,17 +742,8 @@ electron_1.ipcMain.handle("yt:download", async (event, options) => {
         };
     }
     catch (e) {
-        // This catch handles errors *before* spawn (e.g., directory creation)
         console.error(`[Sync spawn error ${videoId}]:`, e);
-        // Update history to reflect pre-spawn error if possible
-        try {
-            const h = store.get("downloadHistory", []);
-            store.set("downloadHistory", h.map(i => i.id === videoId ? { ...i, status: 'error', errorInfo: `Setup failed: ${e.message}` } : i));
-            win?.webContents.send("downloads:updated");
-        }
-        catch { }
-        return { success: false, message: `Setup failed: ${e.message}` };
+        return { success: false, message: `Spawn failed: ${e.message}` };
     }
 });
-// Ensure no extraneous code remains here
 //# sourceMappingURL=main.js.map

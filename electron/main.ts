@@ -1,9 +1,9 @@
 // electron/main.ts
-import { app, BrowserWindow, ipcMain, dialog, shell, clipboard } from "electron" // Added shell, clipboard; Removed protocol
+import { app, BrowserWindow, ipcMain, dialog, shell, clipboard } from "electron"
 import path = require("node:path")
 import ElectronStore from "electron-store" // Using v8.2.0 via package.json
-import { spawn, ChildProcessWithoutNullStreams } from "node:child_process" // Use spawn
-import fs = require("node:fs") // Import fs
+import { spawn, ChildProcessWithoutNullStreams } from "node:child_process"
+import fs = require("node:fs")
 
 // --- Constants ---
 const YTD_SUBFOLDER = "YTDs" // Name for the dedicated download subfolder
@@ -51,7 +51,7 @@ interface StoreType {
 const store: ElectronStore<StoreType> = new ElectronStore<StoreType>({})
 
 // --- Global State ---
-let win: BrowserWindow | null
+let win: BrowserWindow | null = null
 let dependenciesStatus = {
   ytDlpOk: false,
   ffmpegOk: false,
@@ -78,7 +78,6 @@ async function checkCommand(
   let effectivePath = commandOrPath
   let checkViaPath = false
   const versionArg = name === "ffmpeg" ? "-version" : "--version"
-  // console.log(`Checking dependency: ${name} with input path: ${commandOrPath || '(empty, checking PATH)'}`); // Verbose log
   if (
     commandOrPath &&
     (path.isAbsolute(commandOrPath) || commandOrPath.includes(path.sep))
@@ -110,11 +109,11 @@ async function checkCommand(
     effectivePath = name
     checkViaPath = true
   }
-
   return new Promise((resolve) => {
     try {
-      // console.log(`[DepCheck-${name}] Spawning: "${effectivePath}" ${versionArg}`); // Verbose log
-      const proc = spawn(effectivePath, [versionArg])
+      const proc = spawn(effectivePath, [versionArg], {
+        shell: process.platform === "win32",
+      })
       let out = ""
       let errOut = ""
       proc.stdout.on("data", (d) => (out += d.toString()))
@@ -127,7 +126,7 @@ async function checkCommand(
           pathUsed: effectivePath,
           errorMsg: ok
             ? undefined
-            : `Exit Code ${code}. Stderr: ${errOut.trim()}`,
+            : `Exit Code ${code}. Stderr: ${errOut.trim() || "(none)"}`,
         })
       })
       proc.on("error", (err) =>
@@ -147,7 +146,7 @@ async function checkCommand(
   })
 }
 
-async function checkAndStoreDependencies() {
+async function checkAndStoreDependencies(): Promise<boolean> {
   console.log("Starting dependency check...")
   dependenciesStatus.checked = false
   const ytDlpUserPath = store.get("ytDlpExecutablePath")
@@ -169,38 +168,43 @@ async function checkAndStoreDependencies() {
   if (win)
     win.webContents.send("dependencies-status-update", dependenciesStatus)
   const ok = dependenciesStatus.ytDlpOk && dependenciesStatus.ffmpegOk
-  if (!ok) {
-    if (win) {
-      let missing = []
-      if (!dependenciesStatus.ytDlpOk) missing.push("yt-dlp")
-      if (!dependenciesStatus.ffmpegOk) missing.push("ffmpeg")
-      dialog
-        .showMessageBox(win, {
-          type: "warning",
-          title: "Deps Missing",
-          message: `Cannot find/execute: ${missing.join(
-            " & "
-          )}. Check PATH or Settings.`,
-          buttons: ["OK", "Instructions"],
-        })
-        .then((r) => {
-          if (r.response === 1) {
-            shell.openExternal(/*yt-dlp URL*/)
-            shell.openExternal(/*ffmpeg URL*/)
+  if (!ok && win) {
+    let missing = []
+    if (!dependenciesStatus.ytDlpOk) missing.push("yt-dlp")
+    if (!dependenciesStatus.ffmpegOk) missing.push("ffmpeg")
+    dialog
+      .showMessageBox(win, {
+        type: "warning",
+        title: "Deps Missing",
+        message: `Cannot find/execute: ${missing.join(
+          " & "
+        )}. Check PATH or Settings.`,
+        buttons: ["OK", "Instructions"],
+      })
+      .then((r) => {
+        if (r.response === 1) {
+          try {
+            shell.openExternal("https://github.com/yt-dlp/yt-dlp#installation")
+            shell.openExternal("https://ffmpeg.org/download.html")
+          } catch (e) {
+            console.error("Failed to open external links", e)
           }
-        })
-    }
+        }
+      })
+  } else if (ok) {
+    console.log("Dependencies verified.")
   }
   return ok
 }
 
 function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
-  // ... (Keep the full implementation from previous responses - this parses yt-dlp -J output) ...
   const results: DetailedFormat[] = []
-  if (!Array.isArray(formats)) return results
+  if (!Array.isArray(formats)) {
+    return results
+  }
   const bestAudio = formats
     .filter(
-      (f) => f.format_id && f.vcodec === "none" && f.acodec !== "none" && f.abr
+      (f) => f?.format_id && f.vcodec === "none" && f.acodec !== "none" && f.abr
     )
     .sort(
       (a, b) =>
@@ -210,7 +214,7 @@ function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
   const bestVideoOnly = formats
     .filter(
       (f) =>
-        f.format_id && f.vcodec !== "none" && f.acodec === "none" && f.height
+        f?.format_id && f.vcodec !== "none" && f.acodec === "none" && f.height
     )
     .sort(
       (a, b) =>
@@ -233,7 +237,7 @@ function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
   formats
     .filter(
       (f) =>
-        f.format_id &&
+        f?.format_id &&
         f.vcodec !== "none" &&
         f.acodec !== "none" &&
         f.resolution &&
@@ -276,7 +280,7 @@ function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
     formats
       .filter(
         (f) =>
-          f.format_id &&
+          f?.format_id &&
           f.vcodec !== "none" &&
           f.acodec === "none" &&
           f.height &&
@@ -296,15 +300,17 @@ function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
         if (f.vcodec) lParts.push(f.vcodec.split(".")[0])
         lParts.push(`+ Audio`)
         lParts.push(`(${f.ext.toUpperCase()}+${bestAudioExt.toUpperCase()})`)
-        let cSize: number | undefined
-        if (f.filesize_approx && bestAudio?.filesize_approx) {
-          cSize = f.filesize_approx + bestAudio.filesize_approx
-          lParts.push(`~${(cSize / (1024 * 1024)).toFixed(1)}MB`)
-        } else if (f.vbr && bestAudio?.abr) {
+        let combinedSize: number | undefined = undefined // Initialize
+        if (f.filesize_approx != null && bestAudio?.filesize_approx != null) {
+          combinedSize = f.filesize_approx + bestAudio.filesize_approx
+          combinedSize !== undefined &&
+            lParts.push(`~${(combinedSize / (1024 * 1024)).toFixed(1)}MB`)
+        } else if (f.vbr != null && bestAudio?.abr != null) {
           lParts.push(`~${Math.round(f.vbr + bestAudio.abr)}k`)
-        } else if (f.tbr && bestAudio?.abr) {
+        } else if (f.tbr != null && bestAudio?.abr != null) {
           lParts.push(`~${Math.round(f.tbr + bestAudio.abr)}k`)
         }
+        // --- FIX for TS18048: Assign calculated or undefined ---
         results.push({
           id: cId,
           label: lParts.join(" "),
@@ -319,13 +325,13 @@ function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
           tbr: undefined,
           abr: bestAudio?.abr,
           vbr: f.vbr ?? f.tbr,
-          filesize: cSize,
+          filesize: combinedSize,
         })
         addedDirectResolutions.add(qKey)
       })
   }
   if (bestAudio) {
-    const lParts: string[] = ["Audio Only"]
+    const lParts = ["Audio Only"]
     if (bestAudio.acodec) lParts.push(bestAudio.acodec.split(".")[0])
     lParts.push(`(${bestAudio.ext.toUpperCase()})`)
     if (bestAudio.abr) lParts.push(`~${Math.round(bestAudio.abr)}k`)
@@ -352,20 +358,20 @@ function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
       "Video+Audio (Combined)": 2,
       "Audio Only": 3,
     }
-    if (groupOrder[a.group] !== groupOrder[b.group]) {
+    if (groupOrder[a.group] !== groupOrder[b.group])
       return groupOrder[a.group] - groupOrder[b.group]
-    }
-    const qA =
+    // --- FIX for TS2304: Calculate quality inside callback ---
+    const qualityA =
       (a.hasVideo
-        ? (a.resolution ? parseInt(a.resolution.split("x")[1]) : 0) *
+        ? (a.resolution ? parseInt(a.resolution.split("x")[1], 10) : 0) *
           (a.fps ?? 30)
         : 0) + (a.abr ?? a.tbr ?? 0)
-    const qB =
+    const qualityB =
       (b.hasVideo
-        ? (b.resolution ? parseInt(b.resolution.split("x")[1]) : 0) *
+        ? (b.resolution ? parseInt(b.resolution.split("x")[1], 10) : 0) *
           (b.fps ?? 30)
         : 0) + (b.abr ?? b.tbr ?? 0)
-    return qB - qA
+    return qualityB - qualityA // Descending quality
   })
   return results
 }
@@ -376,7 +382,7 @@ function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
 
 function createWindow() {
   const publicPath = process.env.VITE_PUBLIC ?? ""
-  const iconPath = path.join(publicPath, "electron-vite.svg") // Ensure this icon exists in /public
+  const iconPath = path.join(publicPath, "electron-vite.svg")
   win = new BrowserWindow({
     width: 1024,
     height: 768,
@@ -388,31 +394,25 @@ function createWindow() {
       sandbox: false,
     },
   })
-
   win.webContents.on("did-finish-load", () => {
     win?.webContents.send(
       "main-process-message",
       `Backend loaded: ${new Date().toLocaleString()}`
     )
-    if (dependenciesStatus.checked && win) {
-      // Send initial status if check completed before window loaded
+    if (dependenciesStatus.checked && win)
       win.webContents.send("dependencies-status-update", dependenciesStatus)
-    }
   })
-
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
     win.webContents.openDevTools()
   } else {
     win.loadFile(path.join(process.env.DIST ?? "", "index.html"))
   }
-
   win.on("closed", () => {
     win = null
   })
 }
 
-// app.disableHardwareAcceleration(); // Uncomment only if troubleshooting video playback later
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit()
 })
@@ -420,9 +420,7 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow()
 })
 app.whenReady().then(() => {
-  // --- REMOVED protocol registration ---
   createWindow()
-  // Initial dependency check after window is created
   setTimeout(checkAndStoreDependencies, 1500)
 })
 
@@ -471,19 +469,31 @@ ipcMain.handle(
 )
 ipcMain.handle("app:get-dependencies-status", () => dependenciesStatus)
 
-// --- Downloads ---
+// --- Downloads: Get List ---
 ipcMain.handle("downloads:get-list", () => {
   try {
-    const h = store.get("downloadHistory", [])
-    return h
-      .filter(
-        (i) => i.status !== "completed" || !i.path || fs.existsSync(i.path)
-      )
-      .map((i) => ({
-        ...i,
-        fileExists:
-          i.status === "completed" && !!i.path && fs.existsSync(i.path),
-      }))
+    const history = store.get("downloadHistory", [] as DownloadItem[])
+    // Map first to add fileExists status
+    const historyWithCheck = history.map((item: DownloadItem): DownloadItem => {
+      let exists = false
+      if (item.status === "completed" && item.path) {
+        try {
+          exists = fs.existsSync(item.path)
+        } catch (err) {
+          console.error(`[GetList] Error checking file ${item.path}:`, err)
+          exists = false
+        }
+      }
+      return { ...item, fileExists: !!exists } // Ensure boolean
+    })
+    // Now filter out completed items where the file doesn't exist
+    return historyWithCheck.filter((item: DownloadItem) => {
+      // Type item here too
+      if (item.status === "completed" && !item.fileExists) {
+        return false // Filter out
+      }
+      return true // Keep others
+    })
   } catch (e) {
     console.error("Error in get-list:", e)
     return []
@@ -493,7 +503,7 @@ ipcMain.handle("downloads:open-folder", async (_e, filePath: string) => {
   if (!filePath) return false
   try {
     if (!fs.existsSync(filePath)) {
-      dialog.showErrorBox("Error", `File/Folder not found:\n${filePath}`)
+      dialog.showErrorBox("Error", `Path not found:\n${filePath}`)
       return false
     }
     shell.showItemInFolder(path.normalize(filePath))
@@ -537,9 +547,7 @@ ipcMain.handle("downloads:retry", async (event, itemId: string) => {
     const item = h.find((i) => i.id === itemId)
     if (!item) return { success: false, message: "Item not found." }
     console.log(`Retrying download for ${item.url}`)
-    return await ipcMain.handle("yt:download", event, {
-      url: item.url,
-    }) /* TODO: Retry with original options if stored */
+    return await ipcMain.handle("yt:download", event, { url: item.url })
   } catch (e: any) {
     return { success: false, message: `Retry error: ${e.message}` }
   }
@@ -553,7 +561,9 @@ ipcMain.handle(
     if (!dependenciesStatus.ytDlpOk) throw new Error("yt-dlp invalid/missing.")
     return new Promise<DetailedFormat[]>((resolve, reject) => {
       const args = ["-J", url]
-      const proc = spawn(dependenciesStatus.ytDlpPath, args)
+      const proc = spawn(dependenciesStatus.ytDlpPath, args, {
+        windowsHide: true,
+      })
       let json = ""
       let err = ""
       proc.stdout.on("data", (d) => (json += d))
@@ -596,7 +606,6 @@ ipcMain.handle(
       endTime?: string
     }
   ) => {
-    // 1. Dependency Check
     if (!dependenciesStatus.checked) await checkAndStoreDependencies()
     let missingDeps = []
     if (!dependenciesStatus.ytDlpOk) missingDeps.push("yt-dlp")
@@ -613,7 +622,6 @@ ipcMain.handle(
       return { success: false, message: `Missing: ${m}` }
     }
 
-    // 2. Setup Vars & Dir
     const baseDir: string = store.get("downloadPath", app.getPath("downloads"))
     const targetDir = path.join(baseDir, YTD_SUBFOLDER)
     const videoId =
@@ -629,12 +637,11 @@ ipcMain.handle(
       return { success: false, message: `Dir Error: ${e.message}` }
     }
 
-    // 3. Add Pending Item
     try {
-      const h = store.get("downloadHistory", [])
+      const h = store.get("downloadHistory", [] as DownloadItem[])
       const pItem: DownloadItem = {
         id: videoId,
-        title: `Pending: ${options.url}`,
+        title: `Pending: ${options.url.substring(0, 60)}...`,
         path: "",
         status: "pending",
         url: options.url,
@@ -650,7 +657,6 @@ ipcMain.handle(
       console.error(`Error setting pending state for ${videoId}:`, e)
     }
 
-    // 4. Construct Args
     const args: string[] = [
       "--progress",
       "--progress-template",
@@ -660,7 +666,7 @@ ipcMain.handle(
       "-o",
       path.join(targetDir, "%(title)s [%(id)s].%(ext)s"),
       "--no-continue",
-      "--no-overwrites" /* '--force-overwrites', */,
+      "--no-overwrites",
     ]
     if (needsFfmpeg && dependenciesStatus.ffmpegOk)
       args.push("--ffmpeg-location", dependenciesStatus.ffmpegPath)
@@ -680,9 +686,10 @@ ipcMain.handle(
       args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ")
     )
 
-    // 5. Spawn & Handle Events
     try {
-      const proc = spawn(dependenciesStatus.ytDlpPath, args)
+      const proc = spawn(dependenciesStatus.ytDlpPath, args, {
+        windowsHide: true,
+      })
       let stdout = "",
         stderr = "",
         title = `DL ${videoId}`,
@@ -702,7 +709,7 @@ ipcMain.handle(
               const h = store.get("downloadHistory", [])
               store.set(
                 "downloadHistory",
-                h.map((i) =>
+                h.map((i: DownloadItem) =>
                   i.id === videoId
                     ? { ...i, progress: p, status: "downloading" }
                     : i
@@ -728,7 +735,9 @@ ipcMain.handle(
               const h = store.get("downloadHistory", [])
               store.set(
                 "downloadHistory",
-                h.map((i) => (i.id === videoId ? { ...i, title } : i))
+                h.map((i: DownloadItem) =>
+                  i.id === videoId ? { ...i, title } : i
+                )
               )
             } catch (e) {}
           }
@@ -745,15 +754,17 @@ ipcMain.handle(
         console.log(`[close ${videoId}] Code: ${code}`)
         let exists = false
         try {
-          exists = finalPath && fs.existsSync(finalPath)
-        } catch {}
+          exists = !!finalPath && fs.existsSync(finalPath)
+        } catch (e) {
+          console.error(`Error checking existence for ${finalPath}:`, e)
+        }
         const status: DownloadItem["status"] =
           code === 0 && exists ? "completed" : "error"
         let eInfo =
           code !== 0
             ? stderr.trim() || `Exit Code ${code}`
             : !exists
-            ? `File missing: ${finalPath || "(path not detected)"}`
+            ? `File missing/undetected: ${finalPath || "(path unknown)"}`
             : undefined
         if (code === 0 && !finalPath) eInfo = "Completed, path undetected."
         const fTitle =
@@ -761,7 +772,7 @@ ipcMain.handle(
             ? title
             : `Failed: ${options.url.substring(0, 40)}...`
         try {
-          const h = store.get("downloadHistory", [])
+          const h = store.get("downloadHistory", [] as DownloadItem[])
           const fItem: DownloadItem = {
             id: videoId,
             title: fTitle,
@@ -772,19 +783,30 @@ ipcMain.handle(
             timestamp: Date.now(),
             errorInfo: eInfo,
           }
-          const fH = h.map((i) => (i.id === videoId ? fItem : i))
-          if (!fH.some((i) => i.id === videoId)) fH.push(fItem)
+          let updated = false
+          const fH = h.map((i: DownloadItem) => {
+            if (i.id === videoId) {
+              updated = true
+              return fItem
+            }
+            return i
+          })
+          if (!updated) fH.push(fItem)
           store.set("downloadHistory", fH)
           eventSender.send("downloads:updated")
+          console.log(
+            `[Download ${videoId}] Final status (${status}) update sent.`
+          )
         } catch (e: any) {
           console.error(`Error finalizing status for ${videoId}:`, e)
         }
       })
+      // --- FIX for TS2554/TS7006 in error handler ---
       proc.on("error", (err) => {
         console.error(`[spawn error ${videoId}]:`, err)
-        const eInfo = `Spawn failed: ${err.message}`
+        const errorInfo = `Spawn failed: ${err.message}`
         try {
-          const h = store.get("downloadHistory", [])
+          const h = store.get("downloadHistory", [] as DownloadItem[])
           const fItem: DownloadItem = {
             id: videoId,
             title: "Spawn Error",
@@ -792,13 +814,26 @@ ipcMain.handle(
             url: options.url,
             status: "error",
             timestamp: Date.now(),
-            errorInfo: eInfo,
+            errorInfo,
           }
-          const fH = h.map((i) => (i.id === videoId ? fItem : i))
-          if (!fH.some((i) => i.id === videoId)) fH.push(fItem)
+          let updated = false
+          // Explicitly type 'i' in map and some
+          const fH = h.map((i: DownloadItem) => {
+            if (i.id === videoId) {
+              updated = true
+              return fItem
+            }
+            return i
+          })
+          if (!fH.some((i: DownloadItem) => i.id === videoId)) fH.push(fItem)
           store.set("downloadHistory", fH)
           eventSender.send("downloads:updated")
-        } catch (e: any) {}
+        } catch (e: any) {
+          console.error(
+            `Error updating store on spawn failure for ${videoId}:`,
+            e
+          )
+        }
       })
       return {
         success: true,
