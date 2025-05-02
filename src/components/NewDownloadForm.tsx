@@ -82,9 +82,13 @@ function NewDownloadForm({
           setFormats(safeFormats)
           // Set default selection
           const defaultSelection =
-            safeFormats.find((f) => f.group === "Best") ||
-            safeFormats.find((f) => f.group === "Video+Audio (Direct)") ||
-            safeFormats.find((f) => f.group === "Video+Audio (Combined)") ||
+            safeFormats.find((f) => f.group === "Best Quality") || // Match updated group name
+            safeFormats.find(
+              (f) => f.group === "Video + Audio (Single File)"
+            ) ||
+            safeFormats.find(
+              (f) => f.group === "Video + Best Audio (Requires Merge)"
+            ) ||
             safeFormats[0]
           setSelectedFormat(defaultSelection ? defaultSelection.id : "")
         } else {
@@ -229,14 +233,15 @@ function NewDownloadForm({
   }
   // --- End Callbacks and Effects ---
 
-  // Group formats for display
-  const bestFormats = formats.filter((f) => f.group === "Best")
+  // Group formats for display (using updated group names from main.ts)
+  const bestFormats = formats.filter((f) => f.group === "Best Quality")
   const directCombinedFormats = formats.filter(
-    (f) => f.group === "Video+Audio (Direct)"
+    (f) => f.group === "Video + Audio (Single File)"
   )
   const generatedCombinedFormats = formats.filter(
-    (f) => f.group === "Video+Audio (Combined)"
+    (f) => f.group === "Video + Best Audio (Requires Merge)"
   )
+  const videoOnlyFormats = formats.filter((f) => f.group === "Video Only")
   const audioOnlyFormats = formats.filter((f) => f.group === "Audio Only")
 
   return (
@@ -300,10 +305,15 @@ function NewDownloadForm({
                     </span>
                   </SelectValue>
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent
+                  // Add classes to constrain height and enable scrolling
+                  className="max-h-[var(--radix-select-content-available-height)] overflow-y-auto"
+                  // Or use viewport relative height: className="max-h-[60vh] overflow-y-auto"
+                >
                   {/* Format Options */}
                   {formats.length > 0 && (
                     <>
+                      {/* Best Quality */}
                       {bestFormats.map((format) => (
                         <SelectItem
                           key={format.id}
@@ -313,9 +323,11 @@ function NewDownloadForm({
                           🌟 {format.label}
                         </SelectItem>
                       ))}
+
+                      {/* Direct Combined */}
                       {directCombinedFormats.length > 0 && (
                         <SelectGroup>
-                          <SelectLabel>Video + Audio (Direct)</SelectLabel>
+                          <SelectLabel>Video + Audio (Single File)</SelectLabel>
                           {directCombinedFormats.map((format) => (
                             <SelectItem
                               key={format.id}
@@ -327,9 +339,13 @@ function NewDownloadForm({
                           ))}
                         </SelectGroup>
                       )}
+
+                      {/* Generated Combined */}
                       {generatedCombinedFormats.length > 0 && (
                         <SelectGroup>
-                          <SelectLabel>Video + Audio (Combined)</SelectLabel>
+                          <SelectLabel>
+                            Video + Best Audio (Requires Merge)
+                          </SelectLabel>
                           {generatedCombinedFormats.map((format) => (
                             <SelectItem
                               key={format.id}
@@ -341,6 +357,24 @@ function NewDownloadForm({
                           ))}
                         </SelectGroup>
                       )}
+
+                      {/* Video Only */}
+                      {videoOnlyFormats.length > 0 && (
+                        <SelectGroup>
+                          <SelectLabel>Video Only</SelectLabel>
+                          {videoOnlyFormats.map((format) => (
+                            <SelectItem
+                              key={format.id}
+                              value={format.id}
+                              title={format.label}
+                            >
+                              {format.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      )}
+
+                      {/* Audio Only */}
                       {audioOnlyFormats.length > 0 && (
                         <SelectGroup>
                           <SelectLabel>Audio Only</SelectLabel>
@@ -357,6 +391,7 @@ function NewDownloadForm({
                       )}
                     </>
                   )}
+                  {/* Placeholder items for loading/no formats */}
                   {formats.length === 0 &&
                     !isFetchingFormats &&
                     url &&

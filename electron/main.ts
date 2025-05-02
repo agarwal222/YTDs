@@ -6,10 +6,10 @@ import {
   dialog,
   shell,
   clipboard,
-  Notification, // <--- Import Notification
+  Notification,
 } from "electron"
 import path = require("node:path")
-import ElectronStore from "electron-store" // Using v8.2.0 via package.json
+import ElectronStore from "electron-store"
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process"
 import fs = require("node:fs")
 
@@ -31,11 +31,7 @@ interface DownloadItem {
 interface DetailedFormat {
   id: string
   label: string
-  group:
-    | "Best"
-    | "Video+Audio (Direct)"
-    | "Video+Audio (Combined)"
-    | "Audio Only"
+  group: string // Make group flexible string
   hasVideo: boolean
   hasAudio: boolean
   resolution?: string
@@ -43,10 +39,11 @@ interface DetailedFormat {
   vcodec?: string
   acodec?: string
   container?: string
-  tbr?: number
-  abr?: number
-  vbr?: number
-  filesize?: number
+  tbr?: number // Total Bitrate (often for combined streams)
+  abr?: number // Audio Bitrate
+  vbr?: number // Video Bitrate
+  filesize?: number // Approx filesize in bytes
+  qualityRank?: number // Add rank for sorting within groups
 }
 interface StoreType {
   downloadPath?: string
@@ -196,215 +193,310 @@ async function checkAndStoreDependencies(): Promise<boolean> {
     win.webContents.send("dependencies-status-update", dependenciesStatus)
   }
 
-  const allOk = dependenciesStatus.ytDlpOk && dependenciesStatus.ffmpegOk
-  if (!allOk && win) {
-    // Show warning dialog if dependencies are missing (optional, could be handled in renderer)
-    let missing = []
-    if (!dependenciesStatus.ytDlpOk) missing.push("yt-dlp")
-    if (!dependenciesStatus.ffmpegOk)
-      missing.push("ffmpeg (for merging/conversion)")
-    // Dialog is disruptive, consider removing or making it less frequent
-    /*
-    dialog
-      .showMessageBox(win, {
-        type: "warning",
-        title: "Dependencies Missing",
-        message: `Cannot find/execute: ${missing.join(
-          " & "
-        )}. Some features might not work. Check PATH or configure paths in Settings.`,
-        buttons: ["OK", "Instructions"],
-      })
-      .then((r) => {
-        if (r.response === 1) { // Instructions button
-          try {
-            shell.openExternal("https://github.com/yt-dlp/yt-dlp#installation")
-            shell.openExternal("https://ffmpeg.org/download.html")
-          } catch (e) { console.error("Failed to open external links", e); }
-        }
-      });
-      */
+  const allOk = dependenciesStatus.ytDlpOk // && dependenciesStatus.ffmpegOk; // Only require yt-dlp for core functionality
+  if (!dependenciesStatus.ytDlpOk && win) {
+    // Show warning only if yt-dlp is missing
+    console.warn("yt-dlp dependency missing or invalid")
   } else if (allOk) {
-    console.log("All required dependencies verified.")
+    console.log("Core dependency (yt-dlp) verified.")
   }
 
-  return allOk // Return overall status
+  return allOk // Return overall status based on yt-dlp primarily
 }
 
-function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
-  // ... (Keep existing implementation - it seems fine) ...
-  const results: DetailedFormat[] = []
-  if (!Array.isArray(formats)) {
-    return results
+// --- Helper: Format Size ---
+function formatBytes(bytes: number | undefined | null, decimals = 1): string {
+  if (bytes === undefined || bytes === null || bytes === 0) return ""
+  const k = 1024
+  const dm = decimals < 0 ? 0 : decimals
+  const sizes = ["Bytes", "KB", "MB", "GB", "TB"]
+  // Handle potential log(0) or negative bytes
+  if (bytes <= 0) return "0 Bytes"
+  const i = Math.floor(Math.log(bytes) / Math.log(k))
+  // Ensure index is within bounds
+  const safeIndex = Math.min(i, sizes.length - 1)
+  return `~${parseFloat((bytes / Math.pow(k, safeIndex)).toFixed(dm))}${
+    sizes[safeIndex]
+  }`
+}
+
+// --- Helper: Create Label ---
+function createFormatLabel(
+  f: any,
+  type: "direct" | "video" | "audio" | "combined",
+  bestAudioInfo?: any
+): string {
+  const parts: string[] = []
+
+  // Video Info
+  if (type === "video" || type === "direct" || type === "combined") {
+    if (f.height) parts.push(f.height + "p") // 1080p
+    if (f.fps && f.fps > 30) parts.push(`${Math.round(f.fps)}fps`)
+    if (f.vcodec && f.vcodec !== "none") parts.push(f.vcodec.split(".")[0])
+    // Add Video Bitrate if available and type is video-only
+    if (type === "video" && f.vbr) parts.push(`~${Math.round(f.vbr)}k`)
+    else if (type === "video" && f.tbr) parts.push(`~${Math.round(f.tbr)}k`) // Fallback to tbr for video
   }
-  const bestAudio = formats
-    .filter(
-      (f) => f?.format_id && f.vcodec === "none" && f.acodec !== "none" && f.abr
-    )
+
+  // Audio Info
+  if (type === "audio" || type === "direct") {
+    if (f.acodec && f.acodec !== "none") parts.push(f.acodec.split(".")[0])
+    if (f.abr) parts.push(`~${Math.round(f.abr)}k`)
+  }
+
+  // Combined Audio Info (from bestAudioInfo)
+  if (type === "combined" && bestAudioInfo?.acodec) {
+    parts.push(`+${bestAudioInfo.acodec.split(".")[0]}`)
+    if (bestAudioInfo.abr) parts.push(`~${Math.round(bestAudioInfo.abr)}k`)
+  }
+
+  // Container Info
+  if (type === "direct" || type === "video" || type === "audio") {
+    if (f.ext) parts.push(`(${f.ext.toUpperCase()})`)
+  } else if (type === "combined" && bestAudioInfo) {
+    parts.push(`(${f.ext}+${bestAudioInfo.ext})`) // Show both extensions
+  }
+
+  // Filesize Info
+  if (type === "direct" || type === "video" || type === "audio") {
+    if (f.filesize || f.filesize_approx)
+      parts.push(formatBytes(f.filesize ?? f.filesize_approx))
+  } else if (type === "combined" && bestAudioInfo) {
+    let combinedSize: number | undefined = undefined
+    if (f.filesize_approx != null && bestAudioInfo.filesize_approx != null) {
+      combinedSize = f.filesize_approx + bestAudioInfo.filesize_approx
+    }
+    if (combinedSize) parts.push(formatBytes(combinedSize))
+  }
+
+  return parts.join(" ").trim()
+}
+
+// --- REFACTORED: parseAndCombineFormats (WITH LOGGING) ---
+function parseAndCombineFormats(rawFormats: any[]): DetailedFormat[] {
+  const results: DetailedFormat[] = []
+  if (!Array.isArray(rawFormats)) return results
+
+  // Filter out non-http protocols and formats without essential info
+  const validFormats = rawFormats.filter(
+    (f) =>
+      f?.format_id &&
+      f.protocol &&
+      ["http", "https"].includes(f.protocol) &&
+      (f.vcodec !== "none" || f.acodec !== "none") // Must have video OR audio
+  )
+
+  // --- Filter and Sort Raw Formats ---
+  const videoOnlyFormats = validFormats
+    .filter((f) => f.vcodec !== "none" && f.acodec === "none" && f.height)
     .sort(
       (a, b) =>
-        (b.preference ?? -99) - (a.preference ?? -99) ||
-        (b.abr ?? 0) - (a.abr ?? 0)
-    )[0]
-  const bestVideoOnly = formats
-    .filter(
-      (f) =>
-        f?.format_id && f.vcodec !== "none" && f.acodec === "none" && f.height
-    )
-    .sort(
-      (a, b) =>
-        (b.preference ?? -99) - (a.preference ?? -99) ||
         (b.height ?? 0) - (a.height ?? 0) ||
         (b.fps ?? 0) - (a.fps ?? 0) ||
-        (b.vbr ?? b.tbr ?? 0) - (a.vbr ?? a.tbr ?? 0)
-    )[0]
+        (b.vbr ?? b.tbr ?? 0) - (a.vbr ?? a.tbr ?? 0) ||
+        (b.preference ?? -99) - (a.preference ?? -99)
+    )
+
+  const audioOnlyFormats = validFormats
+    .filter((f) => f.vcodec === "none" && f.acodec !== "none" && f.abr)
+    .sort(
+      (a, b) =>
+        (b.abr ?? 0) - (a.abr ?? 0) ||
+        (b.preference ?? -99) - (a.preference ?? -99)
+    )
+
+  const directCombinedFormats = validFormats
+    .filter((f) => f.vcodec !== "none" && f.acodec !== "none" && f.resolution)
+    .sort(
+      (a, b) =>
+        (b.height ?? 0) - (a.height ?? 0) ||
+        (b.fps ?? 0) - (a.fps ?? 0) ||
+        (b.tbr ?? 0) - (a.tbr ?? 0) ||
+        (b.preference ?? -99) - (a.preference ?? -99)
+    )
+
+  // --- START DEBUG LOGGING ---
+  console.log(`\n--- Parsing Formats ---`)
+  console.log(`[Formats Debug] Raw Count: ${rawFormats.length}`)
+  console.log(
+    `[Formats Debug] Valid Count (HTTP(S), Has A/V): ${validFormats.length}`
+  )
+  console.log(`[Formats Debug] VideoOnly Count: ${videoOnlyFormats.length}`)
+  console.log(`[Formats Debug] AudioOnly Count: ${audioOnlyFormats.length}`)
+  console.log(
+    `[Formats Debug] DirectCombined Count: ${directCombinedFormats.length}`
+  )
+  // --- END DEBUG LOGGING ---
+
+  // Find the best audio stream
+  const bestAudio =
+    audioOnlyFormats.find((f) => f.acodec?.startsWith("opus")) ||
+    audioOnlyFormats[0]
   const bestAudioId = bestAudio?.format_id
-  const bestAudioCodec = bestAudio?.acodec?.split(".")[0] ?? "audio"
-  const bestAudioExt = bestAudio?.ext ?? "unk"
+  const bestAudioInfo = bestAudio
+    ? {
+        acodec: bestAudio.acodec,
+        ext: bestAudio.ext,
+        abr: bestAudio.abr,
+        filesize_approx: bestAudio.filesize_approx,
+      }
+    : undefined
+  console.log(
+    `[Formats Debug] Best Audio Selected: ${
+      bestAudio ? bestAudio.format_id + " (" + bestAudio.acodec + ")" : "None"
+    }`
+  ) // Log best audio
+
+  // --- Add "Best" Option ---
   results.push({
     id: "bestvideo+bestaudio/best",
-    label: "Best Quality (Auto - Recommended)",
-    group: "Best",
+    label: "Best Available (Recommended)",
+    group: "Best Quality",
     hasVideo: true,
     hasAudio: true,
+    qualityRank: 10000,
   })
-  const addedDirectResolutions = new Set<string>()
-  formats
-    .filter(
-      (f) =>
-        f?.format_id &&
-        f.vcodec !== "none" &&
-        f.acodec !== "none" &&
-        f.resolution &&
-        f.ext
-    )
-    .sort(
-      (a, b) =>
-        (b.height ?? 0) - (a.height ?? 0) ||
-        (b.fps ?? 0) - (a.fps ?? 0) ||
-        (b.tbr ?? 0) - (a.tbr ?? 0)
-    )
-    .forEach((f) => {
-      const qKey = `${f.height}p${f.fps > 30 ? f.fps : ""}`
-      if (addedDirectResolutions.has(qKey)) return
-      const lParts: string[] = [qKey]
-      if (f.vcodec) lParts.push(f.vcodec.split(".")[0])
-      lParts.push(`(${f.ext.toUpperCase()})`)
-      if (f.filesize_approx)
-        lParts.push(`~${(f.filesize_approx / (1024 * 1024)).toFixed(1)}MB`)
-      else if (f.tbr) lParts.push(`~${Math.round(f.tbr)}k`)
+
+  const addedDirectKeys = new Set<string>()
+
+  // --- Add Direct Combined Formats ---
+  directCombinedFormats.forEach((f) => {
+    const qualityKey = `${f.height}p${f.fps > 30 ? Math.round(f.fps) : ""}`
+    if (addedDirectKeys.has(qualityKey)) return
+    results.push({
+      id: f.format_id,
+      label: createFormatLabel(f, "direct"),
+      group: "Video + Audio (Single File)",
+      hasVideo: true,
+      hasAudio: true,
+      resolution: f.resolution,
+      fps: f.fps,
+      vcodec: f.vcodec,
+      acodec: f.acodec,
+      container: f.ext,
+      tbr: f.tbr,
+      abr: f.abr,
+      vbr: f.vbr,
+      filesize: f.filesize_approx ?? f.filesize,
+      qualityRank: (f.height ?? 0) * 10 + (f.fps ?? 0) + (f.tbr ?? 0) / 1000,
+    })
+    addedDirectKeys.add(qualityKey)
+  })
+  console.log(
+    `[Formats Debug] Added Direct Combined: ${
+      results.filter((r) => r.group === "Video + Audio (Single File)").length
+    } (Unique Res/FPS)`
+  ) // Log count
+
+  // --- Add Generated Combined Formats (Video + Best Audio) ---
+  let addedGeneratedCount = 0 // Counter for logging
+  if (bestAudioId && bestAudioInfo) {
+    videoOnlyFormats.forEach((f) => {
+      const qualityKey = `${f.height}p${f.fps > 30 ? Math.round(f.fps) : ""}`
+      if (addedDirectKeys.has(qualityKey)) return // Skip if direct exists
+      const combinedId = `${f.format_id}+${bestAudioId}`
       results.push({
-        id: f.format_id,
-        label: lParts.join(" "),
-        group: "Video+Audio (Direct)",
+        id: combinedId,
+        label: createFormatLabel(f, "combined", bestAudioInfo),
+        group: "Video + Best Audio (Requires Merge)",
         hasVideo: true,
         hasAudio: true,
         resolution: f.resolution,
         fps: f.fps,
         vcodec: f.vcodec,
-        acodec: f.acodec,
-        container: f.ext,
-        tbr: f.tbr,
-        abr: f.abr,
-        vbr: f.vbr,
-        filesize: f.filesize_approx,
+        acodec: bestAudioInfo.acodec,
+        container: `${f.ext}+${bestAudioInfo.ext}`,
+        tbr: undefined,
+        abr: bestAudioInfo.abr,
+        vbr: f.vbr ?? f.tbr,
+        filesize:
+          f.filesize_approx != null && bestAudioInfo.filesize_approx != null
+            ? f.filesize_approx + bestAudioInfo.filesize_approx
+            : undefined,
+        qualityRank:
+          (f.height ?? 0) * 10 + (f.fps ?? 0) + (f.vbr ?? f.tbr ?? 0) / 1000,
       })
-      addedDirectResolutions.add(qKey)
+      addedDirectKeys.add(qualityKey) // Also mark this key as added
+      addedGeneratedCount++ // Increment counter
     })
-  if (bestAudioId && bestVideoOnly) {
-    formats
-      .filter(
-        (f) =>
-          f?.format_id &&
-          f.vcodec !== "none" &&
-          f.acodec === "none" &&
-          f.height &&
-          f.ext
-      )
-      .sort(
-        (a, b) =>
-          (b.height ?? 0) - (a.height ?? 0) ||
-          (b.fps ?? 0) - (a.fps ?? 0) ||
-          (b.vbr ?? b.tbr ?? 0) - (a.vbr ?? a.tbr ?? 0)
-      )
-      .forEach((f) => {
-        const qKey = `${f.height}p${f.fps > 30 ? f.fps : ""}`
-        if (addedDirectResolutions.has(qKey)) return
-        const cId = `${f.format_id}+${bestAudioId}`
-        const lParts: string[] = [qKey]
-        if (f.vcodec) lParts.push(f.vcodec.split(".")[0])
-        lParts.push(`+ Audio`)
-        lParts.push(`(${f.ext.toUpperCase()}+${bestAudioExt.toUpperCase()})`)
-        let combinedSize: number | undefined = undefined
-        if (f.filesize_approx != null && bestAudio?.filesize_approx != null) {
-          combinedSize = f.filesize_approx + bestAudio.filesize_approx
-          combinedSize !== undefined &&
-            lParts.push(`~${(combinedSize / (1024 * 1024)).toFixed(1)}MB`)
-        } else if (f.vbr != null && bestAudio?.abr != null) {
-          lParts.push(`~${Math.round(f.vbr + bestAudio.abr)}k`)
-        } else if (f.tbr != null && bestAudio?.abr != null) {
-          lParts.push(`~${Math.round(f.tbr + bestAudio.abr)}k`)
-        }
-        results.push({
-          id: cId,
-          label: lParts.join(" "),
-          group: "Video+Audio (Combined)",
-          hasVideo: true,
-          hasAudio: true,
-          resolution: f.resolution,
-          fps: f.fps,
-          vcodec: f.vcodec,
-          acodec: bestAudioCodec,
-          container: `${f.ext}+${bestAudioExt}`,
-          tbr: undefined,
-          abr: bestAudio?.abr,
-          vbr: f.vbr ?? f.tbr,
-          filesize: combinedSize,
-        })
-        addedDirectResolutions.add(qKey)
-      })
   }
-  if (bestAudio) {
-    const lParts = ["Audio Only"]
-    if (bestAudio.acodec) lParts.push(bestAudio.acodec.split(".")[0])
-    lParts.push(`(${bestAudio.ext.toUpperCase()})`)
-    if (bestAudio.abr) lParts.push(`~${Math.round(bestAudio.abr)}k`)
-    if (bestAudio.filesize_approx)
-      lParts.push(
-        `~${(bestAudio.filesize_approx / (1024 * 1024)).toFixed(1)}MB`
-      )
+  console.log(
+    `[Formats Debug] Added Generated Combined: ${addedGeneratedCount}`
+  ) // Log count
+
+  // --- Add Video Only Formats ---
+  let addedVideoOnlyCount = 0
+  videoOnlyFormats.forEach((f) => {
     results.push({
-      id: bestAudio.format_id,
-      label: lParts.join(" "),
+      id: f.format_id,
+      label: createFormatLabel(f, "video"),
+      group: "Video Only",
+      hasVideo: true,
+      hasAudio: false,
+      resolution: f.resolution,
+      fps: f.fps,
+      vcodec: f.vcodec,
+      acodec: "none",
+      container: f.ext,
+      tbr: undefined,
+      abr: undefined,
+      vbr: f.vbr ?? f.tbr,
+      filesize: f.filesize_approx ?? f.filesize,
+      qualityRank:
+        (f.height ?? 0) * 10 + (f.fps ?? 0) + (f.vbr ?? f.tbr ?? 0) / 1000,
+    })
+    addedVideoOnlyCount++
+  })
+  console.log(`[Formats Debug] Added Video Only: ${addedVideoOnlyCount}`) // Log count
+
+  // --- Add Audio Only Formats ---
+  let addedAudioOnlyCount = 0
+  audioOnlyFormats.forEach((f) => {
+    results.push({
+      id: f.format_id,
+      label: createFormatLabel(f, "audio"),
       group: "Audio Only",
       hasVideo: false,
       hasAudio: true,
-      acodec: bestAudio.acodec,
-      container: bestAudio.ext,
-      abr: bestAudio.abr,
-      filesize: bestAudio.filesize_approx,
+      resolution: undefined,
+      fps: undefined,
+      vcodec: "none",
+      acodec: f.acodec,
+      container: f.ext,
+      tbr: undefined,
+      abr: f.abr,
+      vbr: undefined,
+      filesize: f.filesize_approx ?? f.filesize,
+      qualityRank: f.abr ?? 0,
     })
+    addedAudioOnlyCount++
+  })
+  console.log(`[Formats Debug] Added Audio Only: ${addedAudioOnlyCount}`) // Log count
+
+  // --- Final Sorting ---
+  const groupOrder: { [key: string]: number } = {
+    "Best Quality": 0,
+    "Video + Audio (Single File)": 1,
+    "Video + Best Audio (Requires Merge)": 2,
+    "Video Only": 3,
+    "Audio Only": 4,
   }
   results.sort((a, b) => {
-    const groupOrder = {
-      Best: 0,
-      "Video+Audio (Direct)": 1,
-      "Video+Audio (Combined)": 2,
-      "Audio Only": 3,
-    }
-    if (groupOrder[a.group] !== groupOrder[b.group])
-      return groupOrder[a.group] - groupOrder[b.group]
-    const qualityA =
-      (a.hasVideo
-        ? (a.resolution ? parseInt(a.resolution.split("x")[1], 10) : 0) *
-          (a.fps ?? 30)
-        : 0) + (a.abr ?? a.tbr ?? 0)
-    const qualityB =
-      (b.hasVideo
-        ? (b.resolution ? parseInt(b.resolution.split("x")[1], 10) : 0) *
-          (b.fps ?? 30)
-        : 0) + (b.abr ?? b.tbr ?? 0)
-    return qualityB - qualityA
+    const groupA = groupOrder[a.group] ?? 99
+    const groupB = groupOrder[b.group] ?? 99
+    if (groupA !== groupB) return groupA - groupB
+    return (b.qualityRank ?? 0) - (a.qualityRank ?? 0)
   })
+
+  // --- More Debug Logging ---
+  console.log(
+    `[Formats Debug] Final Result Count After Processing/Sorting: ${results.length}`
+  )
+  // Log the groups of the first few items to verify sort order
+  // console.log(`[Formats Debug] Final Results Sample (Groups):`, results.slice(0, 10).map(r => r.group));
+  console.log(`--- Finished Parsing Formats ---\n`)
+  // --- End Debug Logging ---
+
   return results
 }
 
@@ -414,22 +506,27 @@ function parseAndCombineFormats(formats: any[]): DetailedFormat[] {
 
 function createWindow() {
   const publicPath = process.env.VITE_PUBLIC ?? ""
-  // Use a proper icon file if available in 'build' or 'public'
-  const iconPath = path.join(__dirname, "../../build/icon.png") // Adjust if needed
+  // Assuming icon is in build dir for packaged app
+  const iconPath = path.join(__dirname, "../../build/icon.png")
 
   win = new BrowserWindow({
     width: 1024,
     height: 768,
     minWidth: 800,
     minHeight: 600,
-    icon: fs.existsSync(iconPath) ? iconPath : undefined, // Use icon only if it exists
+    // Use icon only if it exists - provide fallbacks for dev if needed
+    icon: fs.existsSync(iconPath)
+      ? iconPath
+      : path.join(publicPath, "electron-vite.svg"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       nodeIntegration: false,
       contextIsolation: true,
-      sandbox: false, // Be cautious with sandbox: false if loading external content
+      sandbox: false,
     },
     show: false, // Don't show until ready
+    // Optional: Add title bar style for macOS
+    // titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
   })
 
   win.once("ready-to-show", () => {
@@ -441,16 +538,14 @@ function createWindow() {
       "main-process-message",
       `Backend loaded: ${new Date().toLocaleString()}`
     )
-    // Send initial dependency status when renderer is ready
     if (win)
       win.webContents.send("dependencies-status-update", dependenciesStatus)
   })
 
   if (VITE_DEV_SERVER_URL) {
     win.loadURL(VITE_DEV_SERVER_URL)
-    win.webContents.openDevTools({ mode: "detach" }) // Open dev tools detached
+    win.webContents.openDevTools({ mode: "detach" })
   } else {
-    // Make sure the path is correct for production build
     win.loadFile(path.join(process.env.DIST!, "index.html"))
   }
 
@@ -458,8 +553,8 @@ function createWindow() {
     win = null
   })
 
-  // Optional: Modify menu for a more native feel (remove default Electron menu)
-  // Menu.setApplicationMenu(null); // Uncomment to remove menu bar completely
+  // Optional: Remove default menu
+  // Menu.setApplicationMenu(null);
 }
 
 app.on("window-all-closed", () => {
@@ -472,15 +567,14 @@ app.on("activate", () => {
 
 app.whenReady().then(() => {
   createWindow()
-  // Check dependencies slightly delayed after window creation
-  setTimeout(checkAndStoreDependencies, 1500)
+  setTimeout(checkAndStoreDependencies, 1500) // Delay initial check slightly
 })
 
 // ==================================
 // --- IPC Handlers ---------------
 // ==================================
 
-// --- NEW: Notification Handler (Optional, direct call used in download) ---
+// --- Notification Handler (Optional: can be called from Renderer too) ---
 ipcMain.handle(
   "app:show-notification",
   (_event, options: { title: string; body: string }) => {
@@ -492,17 +586,17 @@ ipcMain.handle(
   }
 )
 
-// --- Settings ---
+// --- Settings Handlers ---
 ipcMain.handle("settings:get-paths", () => ({
   downloadPath: store.get("downloadPath", app.getPath("downloads")),
-  ytDlpPath: store.get("ytDlpExecutablePath", ""), // Return empty string if not set
-  ffmpegPath: store.get("ffmpegExecutablePath", ""), // Return empty string if not set
+  ytDlpPath: store.get("ytDlpExecutablePath", ""),
+  ffmpegPath: store.get("ffmpegExecutablePath", ""),
 }))
 
 ipcMain.handle("settings:select-download-path", async () => {
   if (!win) return store.get("downloadPath", app.getPath("downloads"))
   const result = await dialog.showOpenDialog(win, {
-    properties: ["openDirectory", "createDirectory"], // Allow creating directory
+    properties: ["openDirectory", "createDirectory"],
     title: "Select Download Location",
   })
   if (!result.canceled && result.filePaths.length > 0) {
@@ -510,7 +604,7 @@ ipcMain.handle("settings:select-download-path", async () => {
     store.set("downloadPath", newPath)
     return newPath
   }
-  return store.get("downloadPath", app.getPath("downloads")) // Return current if cancelled
+  return store.get("downloadPath", app.getPath("downloads"))
 })
 
 ipcMain.handle(
@@ -520,92 +614,67 @@ ipcMain.handle(
     const result = await dialog.showOpenDialog(win, {
       properties: ["openFile"],
       title: `Select ${name} Executable`,
-      // Optional: Add filters based on OS
-      // filters: process.platform === 'win32' ? [{ name: 'Executables', extensions: ['exe'] }] : undefined
     })
     if (!result.canceled && result.filePaths.length > 0) {
       const selectedPath = result.filePaths[0]
-      // Store the selected path
       if (name === "yt-dlp") store.set("ytDlpExecutablePath", selectedPath)
       else store.set("ffmpegExecutablePath", selectedPath)
-
-      // Immediately re-check dependencies and update status
-      await checkAndStoreDependencies()
+      await checkAndStoreDependencies() // Re-check after setting path
       return selectedPath
     }
-    return null // Indicate cancellation
+    return null
   }
 )
 
-// --- Dependencies ---
+// --- Dependencies Handlers ---
 ipcMain.handle("app:check-dependencies", async () => {
-  // This just triggers the check; status is sent via 'dependencies-status-update'
   return await checkAndStoreDependencies()
 })
 
 ipcMain.handle("app:get-dependencies-status", () => {
-  // Return the current status object
   return dependenciesStatus
 })
 
-// --- Downloads: Get List & Actions ---
+// --- Downloads: List & Actions ---
 ipcMain.handle("downloads:get-list", () => {
   try {
     const history = store.get("downloadHistory", [] as DownloadItem[])
-    // Map to check file existence for completed items
     const historyWithCheck = history.map((item: DownloadItem): DownloadItem => {
       let exists = false
-      // Only check if status is completed and path exists
       if (item.status === "completed" && item.path) {
         try {
           exists = fs.existsSync(item.path)
         } catch (err) {
-          console.error(`[GetList] Error checking file ${item.path}:`, err)
-          exists = false // Treat error as file not existing
+          exists = false
         }
       }
-      // Return item with updated fileExists status
-      // Ensure fileExists is boolean, default to false if not applicable
       return { ...item, fileExists: !!exists }
     })
-
-    // Return the list, potentially filtering out missing completed files if desired
-    // For now, return all items and let renderer decide how to display 'missing' ones
     return historyWithCheck
-    /* // Alternative: Filter out completed items where file doesn't exist anymore
-     return historyWithCheck.filter((item: DownloadItem) => {
-         if (item.status === 'completed' && !item.fileExists) {
-             return false; // Filter out
-         }
-         return true; // Keep others
-     });
-     */
   } catch (e) {
     console.error("Error in get-list:", e)
-    return [] // Return empty list on error
+    return []
   }
 })
 
 ipcMain.handle("downloads:open-folder", async (_event, filePath: string) => {
   if (!filePath) return false
   try {
-    // Check if the path exists before attempting to show
     if (!fs.existsSync(filePath)) {
-      // Check if the directory containing the file exists
       const dirPath = path.dirname(filePath)
       if (fs.existsSync(dirPath)) {
-        shell.openPath(dirPath) // Open containing directory instead
+        shell.openPath(dirPath)
         dialog.showErrorBox(
           "File Not Found",
           `Original file not found:\n${filePath}\n\nOpened containing folder instead.`
         )
-        return true // Still potentially useful
+        return true
       } else {
         dialog.showErrorBox("Error", `Path not found:\n${filePath}`)
         return false
       }
     }
-    shell.showItemInFolder(path.normalize(filePath)) // Reveals the file in the folder
+    shell.showItemInFolder(path.normalize(filePath))
     return true
   } catch (e: any) {
     console.error(`Failed open folder for ${filePath}:`, e)
@@ -621,19 +690,18 @@ ipcMain.handle("downloads:remove-item", async (_event, itemId: string) => {
     const updatedHistory = history.filter((item) => item.id !== itemId)
     if (updatedHistory.length < history.length) {
       store.set("downloadHistory", updatedHistory)
-      if (win) win.webContents.send("downloads:updated") // Notify renderer
+      if (win) win.webContents.send("downloads:updated")
       return true
     }
-    return false // Item ID not found
+    return false
   } catch (e: any) {
     console.error(`Failed remove item ${itemId}:`, e)
     return false
   }
 })
 
-// Note: Renderer now handles copy path/URL via navigator.clipboard
-// This main process version can be removed if not needed elsewhere.
 ipcMain.handle("downloads:copy-path", async (_event, filePath: string) => {
+  // Kept for completeness, but recommend renderer clipboard API
   if (!filePath) return false
   try {
     clipboard.writeText(path.normalize(filePath))
@@ -651,13 +719,9 @@ ipcMain.handle("downloads:retry", async (event, itemId: string) => {
     const itemToRetry = history.find((item) => item.id === itemId)
     if (!itemToRetry)
       return { success: false, message: "Item not found in history." }
-
     console.log(`Retrying download for ${itemToRetry.url} (ID: ${itemId})`)
-
-    // Find the original format/options if possible (might need to store more info in DownloadItem)
-    // For now, just re-trigger the download with the URL. User might need to re-select quality.
-    // A more robust retry would re-use the original options.
-    // We call the 'yt:download' handler directly.
+    // Re-trigger download with original URL. Quality might need re-selection by user
+    // in the UI if original format isn't stored/retrieved.
     return await ipcMain.handle("yt:download", event, { url: itemToRetry.url })
   } catch (e: any) {
     console.error(`Failed to retry item ${itemId}:`, e)
@@ -669,13 +733,12 @@ ipcMain.handle("downloads:retry", async (event, itemId: string) => {
 ipcMain.handle(
   "yt:fetch-formats",
   async (_event, url: string): Promise<DetailedFormat[]> => {
-    // Ensure dependencies are checked before fetching
     if (!dependenciesStatus.checked) await checkAndStoreDependencies()
     if (!dependenciesStatus.ytDlpOk)
       throw new Error("yt-dlp is required but missing or invalid.")
 
     return new Promise<DetailedFormat[]>((resolve, reject) => {
-      const args = ["-J", "--flat-playlist", url] // Use -J for JSON output, handle playlists safely
+      const args = ["-J", "--flat-playlist", url]
       console.log(
         `Fetching formats: ${dependenciesStatus.ytDlpPath} ${args.join(" ")}`
       )
@@ -686,26 +749,19 @@ ipcMain.handle(
       let errData = ""
       proc.stdout.on("data", (d) => (jsonData += d.toString()))
       proc.stderr.on("data", (d) => (errData += d.toString()))
-
       proc.on("close", (code) => {
         if (code === 0 && jsonData) {
           try {
             const info = JSON.parse(jsonData)
-            // Handle single video vs playlist
             const formats = info.formats || info.entries?.[0]?.formats
             if (!formats) {
-              // If it's a playlist without formats directly, maybe reject or return empty?
-              if (info.entries) {
+              if (info.entries)
                 throw new Error(
-                  "Playlist detected, but format fetching for individual items not implemented here."
+                  "Playlist detected, format fetching for playlists not fully supported."
                 )
-              } else {
-                throw new Error(
-                  "No video/format information found in yt-dlp output."
-                )
-              }
+              else throw new Error("No video/format information found.")
             }
-            resolve(parseAndCombineFormats(formats))
+            resolve(parseAndCombineFormats(formats)) // Use the updated parser
           } catch (e: any) {
             console.error(
               "Format JSON Parse Error:",
@@ -760,14 +816,13 @@ ipcMain.handle(
     if (!dependenciesStatus.checked) await checkAndStoreDependencies()
     let missingDeps = []
     if (!dependenciesStatus.ytDlpOk) missingDeps.push("yt-dlp")
-    // Determine if ffmpeg is needed
     const needsFfmpeg =
       options.startTime ||
       options.endTime ||
-      options.formatCode?.includes("+") || // Merging formats
-      options.formatCode === "bestvideo+bestaudio/best" || // Default often requires merge
-      !options.formatCode || // If no format specified, assume best = merge
-      options.outputFormat // Recoding/Extracting requires ffmpeg
+      options.formatCode?.includes("+") ||
+      options.formatCode === "bestvideo+bestaudio/best" ||
+      !options.formatCode ||
+      options.outputFormat
     if (needsFfmpeg && !dependenciesStatus.ffmpegOk) missingDeps.push("ffmpeg")
 
     if (missingDeps.length > 0) {
@@ -781,7 +836,6 @@ ipcMain.handle(
     // 2. Prepare Paths and Initial State
     const baseDir: string = store.get("downloadPath", app.getPath("downloads"))
     const targetDir = path.join(baseDir, YTD_SUBFOLDER)
-    // Generate a more robust unique ID, fallback to timestamp
     const videoId = options.url.includes("v=")
       ? options.url.split("v=")[1].split("&")[0]
       : `dl_${Date.now()}`
@@ -801,7 +855,7 @@ ipcMain.handle(
       const existingItemIndex = history.findIndex((i) => i.id === videoId)
       const pendingItem: DownloadItem = {
         id: videoId,
-        title: `Pending: ${options.url.substring(0, 60)}...`, // Initial title
+        title: `Pending: ${options.url.substring(0, 60)}...`,
         path: "",
         status: "pending",
         url: options.url,
@@ -810,75 +864,51 @@ ipcMain.handle(
         fileExists: false,
         errorInfo: undefined,
       }
-      let updatedHistory: DownloadItem[]
-      if (existingItemIndex > -1) {
-        // Update existing item if retrying or somehow re-adding
-        updatedHistory = history.map((item, index) =>
-          index === existingItemIndex ? pendingItem : item
-        )
-      } else {
-        // Add new item
-        updatedHistory = [...history, pendingItem]
-      }
+      let updatedHistory: DownloadItem[] =
+        existingItemIndex > -1
+          ? history.map((item, index) =>
+              index === existingItemIndex ? pendingItem : item
+            )
+          : [...history, pendingItem]
       store.set("downloadHistory", updatedHistory)
-      eventSender.send("downloads:updated") // Notify UI
+      eventSender.send("downloads:updated")
     } catch (e: any) {
       console.error(`Error setting pending state for ${videoId}:`, e)
-      // Continue download attempt even if store update fails initially
     }
 
     // 3. Build yt-dlp Arguments
     const args: string[] = [
-      "--progress", // Enable progress reporting
+      "--progress",
       "--progress-template",
-      "progress:%(progress._percent_str)s", // Specific template for parsing
+      "progress:%(progress._percent_str)s",
       "--encoding",
-      "utf-8", // Ensure UTF-8 output
+      "utf-8",
       "-o",
-      path.join(targetDir, "%(title)s [%(id)s].%(ext)s"), // Output template
-      "--no-continue", // Don't resume partial files (can cause issues)
-      "--no-overwrites", // Don't overwrite existing files (safer default)
-      // "--sponsorblock-mark", "all", // Optional: Mark sponsor segments
-      // "--write-thumbnail", // Optional: Download thumbnail
+      path.join(targetDir, "%(title)s [%(id)s].%(ext)s"),
+      "--no-continue",
+      "--no-overwrites",
+      // Optional args:
+      // "--sponsorblock-mark", "all",
+      // "--write-thumbnail",
+      // "--embed-metadata", // Embed basic metadata
     ]
-
-    // Add ffmpeg path if needed
-    if (needsFfmpeg) {
+    if (needsFfmpeg)
       args.push("--ffmpeg-location", dependenciesStatus.ffmpegPath)
-    }
-
-    // Add format selection argument
-    if (
-      options.formatCode &&
-      options.formatCode !== "bestvideo+bestaudio/best"
-    ) {
+    if (options.formatCode && options.formatCode !== "bestvideo+bestaudio/best")
       args.push("-f", options.formatCode)
-    } else {
-      args.push("-f", "bestvideo+bestaudio/best") // Default to best
-    }
-
-    // Add recoding/extraction arguments
+    else args.push("-f", "bestvideo+bestaudio/best")
     if (options.outputFormat) {
-      if (options.hasVideo) {
-        // If it's a video format, recode video container
-        args.push("--recode-video", options.outputFormat)
-      } else if (options.hasAudio) {
-        // If it's audio-only, extract audio
+      if (options.hasVideo) args.push("--recode-video", options.outputFormat)
+      else if (options.hasAudio)
         args.push("-x", "--audio-format", options.outputFormat)
-        // args.push("--audio-quality", "0"); // Optional: Specify audio quality (0=best)
-      }
     }
-
-    // Add time clipping arguments
     if (options.startTime || options.endTime) {
       args.push(
         "--download-sections",
-        `*${options.startTime || ""}-${options.endTime || ""}` // Format: *start-end
+        `*${options.startTime || ""}-${options.endTime || ""}`
       )
-      args.push("--force-keyframes-at-cuts") // Important for accurate cuts
+      args.push("--force-keyframes-at-cuts")
     }
-
-    // Finally, add the URL
     args.push(options.url)
 
     console.log(
@@ -889,9 +919,8 @@ ipcMain.handle(
     // 4. Spawn yt-dlp Process and Handle Events
     try {
       const proc = spawn(dependenciesStatus.ytDlpPath, args, {
-        windowsHide: true, // Don't show console window on Windows
+        windowsHide: true,
       })
-
       let stdoutBuffer = "",
         stderrBuffer = "",
         detectedTitle = `DL ${videoId}`,
@@ -900,25 +929,19 @@ ipcMain.handle(
       // --- stdout processing ---
       proc.stdout.on("data", (data) => {
         stdoutBuffer += data.toString()
-        // Process line by line
         let newlineIndex
         while ((newlineIndex = stdoutBuffer.indexOf("\n")) >= 0) {
           const line = stdoutBuffer.substring(0, newlineIndex).trim()
           stdoutBuffer = stdoutBuffer.substring(newlineIndex + 1)
-
           if (!line) continue
-
-          // Check for progress percentage
           const progressMatch = line.match(/^progress:(\d+\.?\d*)%$/)
           if (progressMatch?.[1]) {
-            const progress = parseFloat(progressMatch[1])
-            eventSender.send("yt:download-progress", { videoId, progress })
-            // Optionally update store (might be too frequent, UI update is main goal)
-            // updateStoreItemProgress(videoId, progress);
-            continue // Don't log progress lines
+            eventSender.send("yt:download-progress", {
+              videoId,
+              progress: parseFloat(progressMatch[1]),
+            })
+            continue
           }
-
-          // Check for final destination path or merging path
           const destinationMatch =
             line.match(/Destination: "?(.*)"?$/) ||
             line.match(/Merging formats into "?(.*)"?/)
@@ -926,7 +949,6 @@ ipcMain.handle(
             finalPath = path.normalize(
               destinationMatch[1].trim().replace(/^"|"$/g, "")
             )
-            // Extract title from filename (basic attempt)
             try {
               detectedTitle = path
                 .basename(finalPath, path.extname(finalPath))
@@ -936,12 +958,9 @@ ipcMain.handle(
             console.log(
               `[DL ${videoId}] Detected Path: ${finalPath}, Title: ${detectedTitle}`
             )
-            // Update title in store immediately if detected
             updateStoreItemTitle(videoId, detectedTitle)
           }
-
-          // Log other stdout lines for debugging if needed
-          // console.log(`[stdout ${videoId}]: ${line}`);
+          // console.log(`[stdout ${videoId}]: ${line}`); // Uncomment for detailed logs
         }
       })
 
@@ -950,26 +969,21 @@ ipcMain.handle(
         const line = data.toString().trim()
         if (line) {
           console.error(`[stderr ${videoId}]: ${line}`)
-          stderrBuffer += line + "\n" // Collect stderr output
+          stderrBuffer += line + "\n"
         }
       })
 
-      // --- 'close' event (Process finished) ---
+      // --- 'close' event ---
       proc.on("close", (code) => {
         console.log(
-          `[close ${videoId}] Code: ${code}, Final Path: ${
-            finalPath || "(not detected)"
-          }`
+          `[close ${videoId}] Code: ${code}, Path: ${finalPath || "(none)"}`
         )
         let fileExists = false
         if (finalPath) {
           try {
             fileExists = fs.existsSync(finalPath)
-          } catch (e) {
-            console.error(`Error checking file existence for ${finalPath}:`, e)
-          }
+          } catch (e) {}
         }
-
         const status: DownloadItem["status"] =
           code === 0 && fileExists ? "completed" : "error"
         const finalTitle =
@@ -983,7 +997,6 @@ ipcMain.handle(
               }`
             : undefined
 
-        // Update history with final status
         updateStoreItemFinal(videoId, {
           title: finalTitle,
           path: status === "completed" ? finalPath : "",
@@ -993,26 +1006,23 @@ ipcMain.handle(
           errorInfo: errorInfo,
           fileExists: fileExists,
         })
-
-        // Send Native Notification
         if (Notification.isSupported()) {
-          if (status === "completed") {
+          if (status === "completed")
             new Notification({
               title: "Download Complete",
               body: finalTitle,
             }).show()
-          } else if (status === "error") {
+          else if (status === "error")
             new Notification({
               title: "Download Failed",
               body: errorInfo
                 ? `${finalTitle}: ${errorInfo.substring(0, 100)}`
                 : finalTitle,
             }).show()
-          }
         }
       })
 
-      // --- 'error' event (Failed to spawn) ---
+      // --- 'error' event ---
       proc.on("error", (err) => {
         console.error(`[spawn error ${videoId}]:`, err)
         const errorInfo = `Failed to start yt-dlp: ${err.message}`
@@ -1024,11 +1034,8 @@ ipcMain.handle(
           timestamp: Date.now(),
           fileExists: false,
         })
-
-        // Send Native Notification
-        if (Notification.isSupported()) {
+        if (Notification.isSupported())
           new Notification({ title: "Download Error", body: errorInfo }).show()
-        }
       })
 
       return {
@@ -1037,7 +1044,7 @@ ipcMain.handle(
         videoId: videoId,
       }
     } catch (e: any) {
-      // Catch synchronous errors during spawn
+      // Catch synchronous spawn errors
       console.error(`[Sync spawn error ${videoId}]:`, e)
       const errorInfo = `Failed to launch download process: ${e.message}`
       updateStoreItemFinal(videoId, {
@@ -1048,33 +1055,33 @@ ipcMain.handle(
         timestamp: Date.now(),
         fileExists: false,
       })
-
-      // Send Native Notification
-      if (Notification.isSupported()) {
+      if (Notification.isSupported())
         new Notification({ title: "Launch Error", body: errorInfo }).show()
-      }
       return { success: false, message: errorInfo }
     }
   }
 )
 
-// --- Helper functions for store updates (to keep download handler cleaner) ---
+// --- Helper functions for store updates ---
 function updateStoreItemFinal(
   videoId: string,
   finalData: Partial<DownloadItem>
 ) {
   try {
     const history = store.get("downloadHistory", [] as DownloadItem[])
-    const updatedHistory = history.map((item) =>
-      item.id === videoId ? { ...item, ...finalData } : item
-    )
-    // Ensure item exists if somehow pending state failed
-    if (!updatedHistory.some((item) => item.id === videoId)) {
+    let itemFound = false
+    const updatedHistory = history.map((item) => {
+      if (item.id === videoId) {
+        itemFound = true
+        return { ...item, ...finalData } // Merge new data
+      }
+      return item
+    })
+    // If somehow the item wasn't in the list (e.g., pending state failed), add it now.
+    if (!itemFound) {
       console.warn(
         `Item ${videoId} not found in history during final update, adding.`
       )
-      // Need URL at least, get it from original options if possible, otherwise add minimal item
-      // This case should be rare if pending state works.
       const minimalItem: DownloadItem = {
         id: videoId,
         url: finalData.url || "Unknown URL",
@@ -1101,21 +1108,6 @@ function updateStoreItemTitle(videoId: string, title: string) {
       item.id === videoId ? { ...item, title: title } : item
     )
     store.set("downloadHistory", updatedHistory)
-    // No UI update needed just for title usually, wait for progress/completion
-    // if (win) win.webContents.send("downloads:updated");
-  } catch (e: any) {
-    // console.error(`Error saving title for ${videoId}:`, e); // Can be noisy
-  }
+    // No UI update needed just for title detection usually
+  } catch (e: any) {}
 }
-// Optional: Update progress in store (can be too frequent)
-/*
-function updateStoreItemProgress(videoId: string, progress: number) {
-    try {
-        const history = store.get("downloadHistory", [] as DownloadItem[]);
-        const updatedHistory = history.map(item =>
-            item.id === videoId ? { ...item, progress: progress, status: 'downloading' } : item
-        );
-        store.set("downloadHistory", updatedHistory);
-    } catch (e: any) { }
-}
-*/
