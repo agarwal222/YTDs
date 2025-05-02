@@ -332,9 +332,13 @@ function NewDownloadModal({
                         : "Select quality..."
                     }
                   >
-                    {/* Find the format object matching the selected ID and display its label */}
-                    {formats.find((f) => f.id === selectedFormat)?.label ??
-                      (isFetchingFormats ? "Loading..." : "Select quality...")}
+                    {/* Wrap the text content in a span */}
+                    <span>
+                      {formats.find((f) => f.id === selectedFormat)?.label ??
+                        (isFetchingFormats
+                          ? "Loading..."
+                          : "Select quality...")}
+                    </span>
                   </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
@@ -486,10 +490,14 @@ function NewDownloadModal({
               !!fetchError
             }
           >
-            {isDownloading ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : null}
-            {isDownloading ? "Downloading..." : "Download"}
+            <>
+              {" "}
+              {/* Wrap content in a fragment */}
+              {isDownloading ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : null}
+              {isDownloading ? "Downloading..." : "Download"}
+            </>
           </Button>
         </DialogFooter>
       </DialogContent>

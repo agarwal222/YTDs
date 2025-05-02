@@ -1,5 +1,4 @@
 // src/components/DownloadList.tsx
-import { JSX } from "react"
 import { cn } from "@/lib/utils" // For conditional classes
 import { Progress } from "@/components/ui/progress" // Shadcn Progress bar
 import { Button } from "@/components/ui/button" // Shadcn Button
@@ -15,13 +14,14 @@ import {
   FileQuestion,
 } from "lucide-react" // Icons
 // Ensure this path correctly points to where your types are defined or exported from preload
-import type { DownloadItem } from "../../electron/preload"
+import type { DownloadItem } from "../../electron/preload" // Or import from a shared types file
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip" // Shadcn Tooltip
+import React from "react" // Standard React import
 
 // Props expected from App.tsx
 interface DownloadListProps {
@@ -49,7 +49,8 @@ function DownloadList({
   // Helper to render status icon and associated text color class
   const renderStatus = (
     item: DownloadItem
-  ): { icon: JSX.Element; textClass: string; text: string } => {
+  ): { icon: React.ReactNode; textClass: string; text: string } => {
+    // Use React.ReactNode for icon type
     const progressPercent =
       typeof item.progress === "number" ? Math.round(item.progress) : 0 // Round progress
     switch (item.status) {
@@ -92,7 +93,7 @@ function DownloadList({
           textClass: "text-destructive",
           text: "Error",
         }
-      default:
+      default: // Fallback for unknown status
         return {
           icon: (
             <AlertCircle className="h-3 w-3 mr-1.5 text-gray-500 shrink-0" />
@@ -105,7 +106,12 @@ function DownloadList({
 
   // Function to copy path to clipboard
   const copyPath = async (text: string | undefined) => {
-    if (!text) return
+    if (!text || !navigator.clipboard) {
+      // Check if clipboard API is available
+      console.error("Clipboard API not available or path is empty.")
+      // TODO: Show error toast
+      return
+    }
     try {
       await navigator.clipboard.writeText(text)
       // TODO: Consider showing a success toast notification here
@@ -119,9 +125,9 @@ function DownloadList({
   return (
     // TooltipProvider wraps the entire list
     <TooltipProvider delayDuration={300}>
-      <div className="flex flex-col gap-1 p-1">
+      <div className="flex flex-col gap-2 p-2">
         {" "}
-        {/* Padding around the list */}
+        {/* List container */}
         {/* Sort list items by timestamp descending (newest first) */}
         {downloads
           .slice()
@@ -139,14 +145,14 @@ function DownloadList({
             // Determine display title
             const displayTitle =
               isCompleted || isProcessing
-                ? item.title || `Video ID: ${item.id}`
+                ? item.title || `Video ID: ${item.id}` // Show actual title if available
                 : isError
-                ? `Error: ${item.url.substring(0, 50)}...`
+                ? `Error: ${item.url.substring(0, 50)}...` // Generic title for errors
                 : `Unknown: ${item.id}`
             const truncatedTitle =
               displayTitle.length > 80
                 ? displayTitle.substring(0, 77) + "..."
-                : displayTitle
+                : displayTitle // Truncate long titles
 
             // Determine content for the main tooltip (shown on item hover)
             const tooltipContent = canInteractWithPath
@@ -166,126 +172,146 @@ function DownloadList({
                   {/* Outer div for the list item */}
                   <div
                     className={cn(
-                      "w-full text-left p-2.5 rounded-md border flex flex-col gap-1.5 transition-colors duration-150", // Using flex-col layout
+                      "w-full text-left p-3 rounded-md border flex flex-row items-center gap-3 transition-colors duration-150 hover:bg-muted/50", // Base styles using flex-row
                       // Conditional border/background based on status
                       isCompleted && canInteractWithPath
-                        ? "border-green-500/30"
+                        ? "border-green-600/40"
                         : "border-border", // Default border, green if completed+exists
                       isCompleted && !canInteractWithPath
                         ? "border-amber-500/30 opacity-75"
                         : "", // Amber border/dimmed if completed but file missing
-                      isError ? "border-destructive/40 bg-destructive/5" : "",
-                      isProcessing ? "border-blue-500/20 bg-blue-500/5" : ""
+                      isError ? "border-destructive/50 bg-destructive/10" : "",
+                      isProcessing ? "border-blue-500/30 bg-blue-500/10" : ""
                     )}
                   >
-                    {/* Line 1: Title and Action Buttons */}
-                    <div className="flex justify-between items-start gap-2">
-                      {/* Main title - tooltip attached here */}
+                    {/* Main Content Area (Title, Status, Progress) */}
+                    <div className="flex-grow flex flex-col gap-1 overflow-hidden">
+                      {/* Title */}
                       <p
                         className={cn(
-                          "flex-grow text-sm font-medium leading-tight truncate cursor-help",
+                          "text-sm font-medium leading-tight truncate",
                           isError ? "text-destructive" : ""
                         )}
                       >
                         {truncatedTitle}
                       </p>
 
-                      {/* Action Buttons Container */}
-                      <div className="flex gap-0.5 flex-shrink-0 -mr-1 -mt-1">
-                        {canInteractWithPath && ( // Show Open Folder only if completed and file exists
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              onOpenFolder(item.path)
-                            }}
-                            title="Open Containing Folder"
-                          >
-                            <FolderOpen className="h-4 w-4 text-muted-foreground hover:text-foreground" />
-                          </Button>
+                      {/* Status Icon/Text and Error Snippet */}
+                      <div
+                        className={cn(
+                          "text-xs truncate flex items-center",
+                          statusDetails.textClass
                         )}
-                        {canInteractWithPath && ( // Show Copy Path only if completed and file exists
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              copyPath(item.path)
-                            }}
-                            title="Copy File Path"
-                          >
-                            <Copy className="h-4 w-4 text-muted-foreground hover:text-foreground" />
-                          </Button>
+                      >
+                        {statusDetails.icon}
+                        <span className="ml-0.5">{statusDetails.text}</span>
+                        {/* Show snippet of error info directly if status is error */}
+                        {isError && item.errorInfo && (
+                          <span className="ml-1.5 text-muted-foreground truncate">
+                            : {item.errorInfo.substring(0, 50)}...
+                          </span>
                         )}
-                        {isError && ( // Show Retry only on error
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              onRetry(item)
-                            }}
-                            title="Retry Download"
-                          >
-                            <RotateCcw className="h-4 w-4 text-muted-foreground hover:text-primary" />
-                          </Button>
-                        )}
-                        {/* Always show Remove button */}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="text-muted-foreground hover:text-destructive"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onRemoveItem(item.id)
-                          }}
-                          title="Remove From List"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
                       </div>
+
+                      {/* Progress Bar */}
+                      {item.status === "downloading" &&
+                        typeof item.progress === "number" && (
+                          <div className="mt-1">
+                            <Progress
+                              value={item.progress}
+                              className="h-1.5 w-full"
+                            />
+                          </div>
+                        )}
                     </div>
 
-                    {/* Line 2: Status Icon/Text and Error Snippet */}
-                    <div
-                      className={cn(
-                        "text-xs truncate flex items-center",
-                        statusDetails.textClass
+                    {/* Action Buttons Container */}
+                    <div className="flex gap-0 flex-shrink-0 items-center">
+                      {/* Open Folder Button */}
+                      {canInteractWithPath && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onOpenFolder(item.path)
+                              }}
+                            >
+                              <FolderOpen className="h-4 w-4 text-muted-foreground group-hover:text-foreground" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Open Folder</TooltipContent>
+                        </Tooltip>
                       )}
-                    >
-                      {statusDetails.icon}
-                      <span className="ml-0.5">{statusDetails.text}</span>
-                      {/* Show snippet of error info directly if status is error */}
-                      {isError && item.errorInfo && (
-                        <span className="ml-1.5 text-muted-foreground truncate">
-                          : {item.errorInfo.substring(0, 60)}...
-                        </span>
+                      {/* Copy Path Button */}
+                      {canInteractWithPath && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                copyPath(item.path)
+                              }}
+                            >
+                              <Copy className="h-4 w-4 text-muted-foreground group-hover:text-foreground" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Copy Path</TooltipContent>
+                        </Tooltip>
                       )}
+                      {/* Retry Button */}
+                      {isError && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onRetry(item)
+                              }}
+                            >
+                              <RotateCcw className="h-4 w-4 text-muted-foreground group-hover:text-primary" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Retry</TooltipContent>
+                        </Tooltip>
+                      )}
+                      {/* Remove Button */}
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onRemoveItem(item.id)
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Remove</TooltipContent>
+                      </Tooltip>
                     </div>
-
-                    {/* Progress Bar - only shown when downloading */}
-                    {item.status === "downloading" &&
-                      typeof item.progress === "number" && (
-                        <div className="mt-1.5">
-                          {" "}
-                          <Progress
-                            value={item.progress}
-                            className="h-1.5 w-full"
-                          />{" "}
-                        </div>
-                      )}
                   </div>
                 </TooltipTrigger>
-                {/* Tooltip Content - Shows full path or error */}
+                {/* Tooltip Content (Main Trigger) */}
                 <TooltipContent
                   side="bottom"
                   align="start"
                   className="max-w-xs break-words bg-popover text-popover-foreground shadow-md rounded-md px-3 py-1.5 text-xs"
                 >
                   <p>{tooltipContent}</p>
-                  {/* Add timestamp info to tooltip */}
-                  {item.timestamp && (
+                  {typeof item.timestamp === "number" && (
                     <p className="text-xs text-muted-foreground mt-1">
                       {item.status} on:{" "}
                       {new Date(item.timestamp).toLocaleString()}
@@ -305,4 +331,5 @@ function DownloadList({
   )
 }
 
+// Export the component directly without the ErrorBoundary wrapper here
 export default DownloadList
