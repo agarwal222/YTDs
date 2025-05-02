@@ -13,13 +13,11 @@ const electronAPI = {
     onDownloadsUpdated: (callback) => {
         const listener = () => callback();
         electron_1.ipcRenderer.on("downloads:updated", listener);
-        // Return cleanup function
         return () => electron_1.ipcRenderer.removeListener("downloads:updated", listener);
     },
     openItemFolder: (filePath) => electron_1.ipcRenderer.invoke("downloads:open-folder", filePath),
     removeItem: (itemId) => electron_1.ipcRenderer.invoke("downloads:remove-item", itemId),
-    copyItemPath: (filePath // Keep exposed if needed, but prefer renderer clipboard
-    ) => electron_1.ipcRenderer.invoke("downloads:copy-path", filePath),
+    copyItemPath: (filePath) => electron_1.ipcRenderer.invoke("downloads:copy-path", filePath),
     retryDownload: (itemId) => electron_1.ipcRenderer.invoke("downloads:retry", itemId),
     // YouTube Actions
     fetchFormats: (url) => electron_1.ipcRenderer.invoke("yt:fetch-formats", url),
@@ -27,28 +25,32 @@ const electronAPI = {
     onDownloadProgress: (callback) => {
         const listener = (_event, progressData) => callback(progressData);
         electron_1.ipcRenderer.on("yt:download-progress", listener);
-        // Return cleanup function
         return () => electron_1.ipcRenderer.removeListener("yt:download-progress", listener);
     },
+    // Playlist Implementations
+    fetchPlaylistVideos: (playlistUrl) => electron_1.ipcRenderer.invoke("yt:fetch-playlist-videos", playlistUrl),
+    downloadPlaylistItems: (items, options) => electron_1.ipcRenderer.invoke("yt:download-playlist-items", items, options),
     // Dependencies
     checkDependencies: () => electron_1.ipcRenderer.invoke("app:check-dependencies"),
     getDependenciesStatus: () => electron_1.ipcRenderer.invoke("app:get-dependencies-status"),
     onDependenciesStatusUpdate: (callback) => {
         const listener = (_event, status) => callback(status);
         electron_1.ipcRenderer.on("dependencies-status-update", listener);
-        // Return cleanup function
         return () => electron_1.ipcRenderer.removeListener("dependencies-status-update", listener);
+    },
+    // Auto Update
+    onUpdateDownloadProgress: (callback) => {
+        const listener = (_event, percent) => callback(percent);
+        electron_1.ipcRenderer.on("update-download-progress", listener);
+        return () => electron_1.ipcRenderer.removeListener("update-download-progress", listener);
     },
     // Other
     onMainProcessMessage: (callback) => {
         const listener = (_event, message) => callback(message);
         electron_1.ipcRenderer.on("main-process-message", listener);
-        // Return cleanup function
         return () => electron_1.ipcRenderer.removeListener("main-process-message", listener);
     },
-    // --- Notification ---
-    showNotification: (options // Expose the handler
-    ) => electron_1.ipcRenderer.invoke("app:show-notification", options),
+    showNotification: (options) => electron_1.ipcRenderer.invoke("app:show-notification", options),
 };
 // --- Securely expose the API ---
 try {

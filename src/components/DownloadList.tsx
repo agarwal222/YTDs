@@ -11,9 +11,10 @@ import {
   Trash2,
   RotateCcw,
   Copy,
-  Link as LinkIcon, // Rename to avoid conflict with React Router Link
+  Link as LinkIcon,
   FileQuestion,
   ExternalLink,
+  ImageOff, // Add ImageOff
 } from "lucide-react"
 import type { DownloadItem } from "../../electron/preload"
 import {
@@ -109,7 +110,7 @@ function DownloadList({
     }
   }
 
-  // Function to copy text to clipboard (used for both path and URL)
+  // Function to copy text to clipboard
   const copyToClipboard = async (
     text: string | undefined,
     type: "Path" | "URL"
@@ -142,27 +143,19 @@ function DownloadList({
 
   return (
     <TooltipProvider delayDuration={300}>
-      {/* Use ul for semantic list, no outer padding */}
       <ul className="flex flex-col gap-0 p-0">
         {downloads
-          .slice() // Create a shallow copy before sorting
-          .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0)) // Sort by timestamp desc
+          .slice()
+          .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
           .map((item) => {
-            // Determine item states
             const isCompleted = item.status === "completed"
             const isError = item.status === "error"
             const canInteractWithPath =
               isCompleted && !!item.fileExists && !!item.path
-
-            // Prepare display text and status
             const displayTitle = item.title || `Video ID: ${item.id}`
-            // Truncate title visually, show full in tooltip
-            const truncatedTitle = displayTitle // Handled by CSS truncate now
-
             const statusDetails = renderStatus(item)
 
             return (
-              // List item with group class for hover effects
               <li
                 key={item.id}
                 className={cn(
@@ -170,7 +163,6 @@ function DownloadList({
                   "transition-colors duration-150 hover:bg-muted/50",
                   canInteractWithPath ? "cursor-pointer" : "cursor-default"
                 )}
-                // Click action for completed items
                 onClick={() => {
                   if (canInteractWithPath) {
                     onOpenFolder(item.path)
@@ -180,20 +172,64 @@ function DownloadList({
                   canInteractWithPath
                     ? `Click to open folder for: ${displayTitle}`
                     : displayTitle
-                } // Basic title attr
+                }
               >
-                {/* Main Item Content Area (Takes most space) */}
-                <div className="flex-grow flex flex-col gap-1 overflow-hidden p-3">
-                  {/* Title (truncates) */}
+                {/* --- Thumbnail Column --- */}
+                <div className="flex-shrink-0 w-24 p-2 hidden sm:block">
+                  {" "}
+                  {/* Fixed width, hidden on small screens */}
+                  <div className="w-full aspect-video rounded border bg-secondary overflow-hidden relative">
+                    {" "}
+                    {/* Aspect ratio container */}
+                    {item.thumbnailUrl ? (
+                      <img
+                        src={item.thumbnailUrl}
+                        alt="Thumbnail"
+                        className="absolute inset-0 w-full h-full object-cover transition-opacity duration-300" // Use absolute positioning
+                        loading="lazy"
+                        onError={(e) => {
+                          // Hide img and show placeholder sibling on error
+                          const img = e.target as HTMLImageElement
+                          img.style.opacity = "0" // Fade out smoothly
+                          img.style.pointerEvents = "none"
+                          const placeholder = img.nextElementSibling
+                          if (placeholder)
+                            (placeholder as HTMLElement).style.opacity = "1"
+                        }}
+                        onLoad={(e) => {
+                          // Ensure image is visible on load
+                          ;(e.target as HTMLImageElement).style.opacity = "1"
+                        }}
+                        style={{ opacity: 0 }} // Start hidden, fade in on load
+                      />
+                    ) : null}
+                    {/* Placeholder always present but shown based on img error/load */}
+                    <div
+                      className={cn(
+                        "absolute inset-0 w-full h-full flex items-center justify-center bg-secondary transition-opacity duration-300",
+                        item.thumbnailUrl ? "opacity-0" : "opacity-100" // Show if no URL
+                      )}
+                    >
+                      <ImageOff className="w-5 h-5 text-muted-foreground" />
+                    </div>
+                  </div>
+                </div>
+                {/* --- End Thumbnail Column --- */}
+
+                {/* Main Item Content Area */}
+                <div className="flex-grow flex flex-col gap-1 overflow-hidden py-3 pl-3 pr-1 sm:pl-0">
+                  {" "}
+                  {/* Adjust padding for thumb */}
+                  {/* Title */}
                   <p
                     className={cn(
                       "text-sm font-medium leading-tight truncate",
                       isError ? "text-destructive" : ""
                     )}
                   >
-                    {truncatedTitle}
+                    {" "}
+                    {displayTitle}{" "}
                   </p>
-
                   {/* Status Icon/Text */}
                   <div
                     className={cn(
@@ -203,38 +239,40 @@ function DownloadList({
                   >
                     {statusDetails.icon}
                     <span className="ml-0.5">{statusDetails.text}</span>
-                    {/* Show concise error in status line */}
                     {isError && item.errorInfo && (
                       <span
                         className="ml-1.5 text-muted-foreground truncate"
                         title={item.errorInfo}
                       >
-                        : {item.errorInfo.split("\n")[0].substring(0, 50)}...
+                        {" "}
+                        : {item.errorInfo
+                          .split("\n")[0]
+                          .substring(0, 50)}...{" "}
                       </span>
                     )}
                   </div>
-
                   {/* Progress Bar */}
                   {item.status === "downloading" &&
                     typeof item.progress === "number" && (
                       <div className="mt-1.5">
+                        {" "}
                         <Progress
                           value={item.progress}
                           className="h-1 w-full"
-                        />
+                        />{" "}
                       </div>
                     )}
                 </div>
 
-                {/* Action Buttons Area (Fixed width, shows on hover) */}
+                {/* Action Buttons Area */}
                 <div
                   className={cn(
-                    "flex-shrink-0 flex gap-0 items-center justify-end px-2", // Align items center vertically
-                    "opacity-0 group-hover:opacity-100 focus-within:opacity-100", // Show on hover or if button focused
+                    "flex-shrink-0 flex gap-0 items-center justify-end px-2",
+                    "opacity-0 group-hover:opacity-100 focus-within:opacity-100",
                     "transition-opacity duration-150"
                   )}
                 >
-                  {/* Buttons appear here */}
+                  {/* Buttons */}
                   {canInteractWithPath && (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -322,15 +360,6 @@ function DownloadList({
                     <TooltipContent>Remove</TooltipContent>
                   </Tooltip>
                 </div>
-
-                {/* Visual cue for clickable items (Optional) */}
-                {/*
-                 {canInteractWithPath && (
-                    <div className="absolute right-1 top-1 opacity-0 group-hover:opacity-50 transition-opacity duration-150 pointer-events-none">
-                        <ExternalLink className="h-3 w-3 text-muted-foreground" />
-                    </div>
-                 )}
-                 */}
               </li>
             )
           })}

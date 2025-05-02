@@ -12,15 +12,12 @@ export interface DownloadItem {
   timestamp?: number
   fileExists?: boolean
   errorInfo?: string
+  thumbnailUrl?: string // Added thumbnail URL
 }
 export interface DetailedFormat {
   id: string
   label: string
-  group:
-    | "Best"
-    | "Video+Audio (Direct)"
-    | "Video+Audio (Combined)"
-    | "Audio Only"
+  group: string
   hasVideo: boolean
   hasAudio: boolean
   resolution?: string
@@ -32,8 +29,10 @@ export interface DetailedFormat {
   abr?: number
   vbr?: number
   filesize?: number
+  qualityRank?: number
 }
 export interface DownloadOptions {
+  // Options for a SINGLE video download
   url: string
   formatCode?: string
   outputFormat?: string
@@ -54,50 +53,80 @@ export interface ProgressData {
 }
 export interface SettingsPaths {
   downloadPath: string
-  ytDlpPath: string // May be empty if using PATH
-  ffmpegPath: string // May be empty if using PATH
+  ytDlpPath: string
+  ffmpegPath: string
 }
 export interface DependenciesStatus {
   ytDlpOk: boolean
   ffmpegOk: boolean
-  checked: boolean // Has the check been performed at least once?
-  ytDlpPath: string // Path used for check (could be command name or full path)
-  ffmpegPath: string // Path used for check
+  checked: boolean
+  ytDlpPath: string
+  ffmpegPath: string
+}
+
+// --- Playlist Item Type ---
+export interface PlaylistItem {
+  id: string
+  url: string
+  title: string
+  thumbnail?: string
+}
+// --- Playlist Download Options Type ---
+export interface PlaylistDownloadOptions {
+  formatCode?: string
+  outputFormat?: string
+  hasVideo?: boolean
+  hasAudio?: boolean
 }
 
 // --- Define ElectronAPI Shape ---
 export interface ElectronAPI {
   // Settings
   getSettingsPaths: () => Promise<SettingsPaths>
-  selectDownloadPath: () => Promise<string | null> // Returns new path or null if cancelled
-  selectExecutablePath: (name: "yt-dlp" | "ffmpeg") => Promise<string | null> // Returns new path or null
+  selectDownloadPath: () => Promise<string | null>
+  selectExecutablePath: (name: "yt-dlp" | "ffmpeg") => Promise<string | null>
 
   // Downloads
   getDownloads: () => Promise<DownloadItem[]>
-  onDownloadsUpdated: (callback: () => void) => () => void // Listener for list changes
-  openItemFolder: (filePath: string) => Promise<boolean> // Action
-  removeItem: (itemId: string) => Promise<boolean> // Action
-  copyItemPath: (filePath: string) => Promise<boolean> // Kept for potential use, but renderer uses navigator.clipboard
-  retryDownload: (itemId: string) => Promise<DownloadResult> // Action
+  onDownloadsUpdated: (callback: () => void) => () => void
+  openItemFolder: (filePath: string) => Promise<boolean>
+  removeItem: (itemId: string) => Promise<boolean>
+  copyItemPath: (filePath: string) => Promise<boolean>
+  retryDownload: (itemId: string) => Promise<DownloadResult>
 
   // YouTube Actions
-  fetchFormats: (url: string) => Promise<DetailedFormat[]>
-  downloadVideo: (options: DownloadOptions) => Promise<DownloadResult>
+  fetchFormats: (
+    url: string
+  ) => Promise<{
+    formats: DetailedFormat[]
+    thumbnailUrl?: string
+    title?: string
+  }> // For single video info
+  downloadVideo: (options: DownloadOptions) => Promise<DownloadResult> // For single video download
   onDownloadProgress: (
     callback: (progressData: ProgressData) => void
-  ) => () => void // Listener for progress
+  ) => () => void // Listener for download progress
+
+  // --- Playlist Handlers ---
+  fetchPlaylistVideos: (playlistUrl: string) => Promise<PlaylistItem[]>
+  downloadPlaylistItems: (
+    items: PlaylistItem[],
+    options: PlaylistDownloadOptions
+  ) => Promise<{ success: boolean; message: string }>
 
   // Dependencies
-  checkDependencies: () => Promise<boolean> // Trigger re-check, returns overall status after check
-  getDependenciesStatus: () => Promise<DependenciesStatus> // Get current status immediately
+  checkDependencies: () => Promise<boolean>
+  getDependenciesStatus: () => Promise<DependenciesStatus>
   onDependenciesStatusUpdate: (
     callback: (status: DependenciesStatus) => void
-  ) => () => void // Listen for status changes pushed from main
+  ) => () => void
+
+  // Auto Update Progress Listener
+  onUpdateDownloadProgress: (callback: (percent: number) => void) => () => void
 
   // Other
   onMainProcessMessage: (callback: (message: string) => void) => () => void
-  // --- Notification ---
-  showNotification: (options: { title: string; body: string }) => Promise<void> // Can be called from renderer if needed
+  showNotification: (options: { title: string; body: string }) => Promise<void>
 }
 
 // --- Implementation Mapping IPC ---
@@ -113,15 +142,13 @@ const electronAPI: ElectronAPI = {
   onDownloadsUpdated: (callback) => {
     const listener = () => callback()
     ipcRenderer.on("downloads:updated", listener)
-    // Return cleanup function
     return () => ipcRenderer.removeListener("downloads:updated", listener)
   },
   openItemFolder: (filePath) =>
     ipcRenderer.invoke("downloads:open-folder", filePath),
   removeItem: (itemId) => ipcRenderer.invoke("downloads:remove-item", itemId),
-  copyItemPath: (
-    filePath // Keep exposed if needed, but prefer renderer clipboard
-  ) => ipcRenderer.invoke("downloads:copy-path", filePath),
+  copyItemPath: (filePath) =>
+    ipcRenderer.invoke("downloads:copy-path", filePath),
   retryDownload: (itemId) => ipcRenderer.invoke("downloads:retry", itemId),
 
   // YouTube Actions
@@ -131,9 +158,14 @@ const electronAPI: ElectronAPI = {
     const listener = (_event: any, progressData: ProgressData) =>
       callback(progressData)
     ipcRenderer.on("yt:download-progress", listener)
-    // Return cleanup function
     return () => ipcRenderer.removeListener("yt:download-progress", listener)
   },
+
+  // Playlist Implementations
+  fetchPlaylistVideos: (playlistUrl) =>
+    ipcRenderer.invoke("yt:fetch-playlist-videos", playlistUrl),
+  downloadPlaylistItems: (items, options) =>
+    ipcRenderer.invoke("yt:download-playlist-items", items, options),
 
   // Dependencies
   checkDependencies: () => ipcRenderer.invoke("app:check-dependencies"),
@@ -143,23 +175,26 @@ const electronAPI: ElectronAPI = {
     const listener = (_event: any, status: DependenciesStatus) =>
       callback(status)
     ipcRenderer.on("dependencies-status-update", listener)
-    // Return cleanup function
     return () =>
       ipcRenderer.removeListener("dependencies-status-update", listener)
+  },
+
+  // Auto Update
+  onUpdateDownloadProgress: (callback) => {
+    const listener = (_event: any, percent: number) => callback(percent)
+    ipcRenderer.on("update-download-progress", listener)
+    return () =>
+      ipcRenderer.removeListener("update-download-progress", listener)
   },
 
   // Other
   onMainProcessMessage: (callback) => {
     const listener = (_event: any, message: string) => callback(message)
     ipcRenderer.on("main-process-message", listener)
-    // Return cleanup function
     return () => ipcRenderer.removeListener("main-process-message", listener)
   },
-
-  // --- Notification ---
-  showNotification: (
-    options // Expose the handler
-  ) => ipcRenderer.invoke("app:show-notification", options),
+  showNotification: (options) =>
+    ipcRenderer.invoke("app:show-notification", options),
 }
 
 // --- Securely expose the API ---
@@ -171,7 +206,6 @@ try {
 }
 
 // --- Global Type Declaration for Renderer ---
-// Ensure this is available for your React components
 declare global {
   interface Window {
     electronAPI: ElectronAPI

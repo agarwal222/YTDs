@@ -5,12 +5,18 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 // electron/main.ts
 const electron_1 = require("electron");
+const electron_updater_1 = require("electron-updater"); // Import autoUpdater
 const path = require("node:path");
 const electron_store_1 = __importDefault(require("electron-store"));
 const node_child_process_1 = require("node:child_process");
 const fs = require("node:fs");
+// Optional: Setup a proper logger like electron-log
+// import log from 'electron-log/main';
+// autoUpdater.logger = log;
+// autoUpdater.logger.transports.file.level = 'info';
+// log.info('App starting...');
 // --- Constants ---
-const YTD_SUBFOLDER = "YTDs"; // Name for the dedicated download subfolder
+const YTD_SUBFOLDER = "YTDs";
 // --- Store Initialization ---
 const store = new electron_store_1.default({});
 // --- Global State ---
@@ -19,8 +25,8 @@ let dependenciesStatus = {
     ytDlpOk: false,
     ffmpegOk: false,
     checked: false,
-    ytDlpPath: "yt-dlp", // Default command name
-    ffmpegPath: "ffmpeg", // Default command name
+    ytDlpPath: "yt-dlp",
+    ffmpegPath: "ffmpeg",
 };
 // --- Path Calculations ---
 process.env.DIST = path.join(__dirname, "../dist");
@@ -35,7 +41,6 @@ async function checkCommand(commandOrPath, name) {
     let effectivePath = commandOrPath;
     let checkViaPath = false;
     const versionArg = name === "ffmpeg" ? "-version" : "--version";
-    // If a specific path is provided, validate and use it
     if (commandOrPath &&
         (path.isAbsolute(commandOrPath) || commandOrPath.includes(path.sep))) {
         try {
@@ -53,7 +58,6 @@ async function checkCommand(commandOrPath, name) {
                     errorMsg: `Path not file: ${commandOrPath}`,
                 };
             }
-            // Use the validated absolute/relative path
             effectivePath = commandOrPath;
         }
         catch (err) {
@@ -65,15 +69,13 @@ async function checkCommand(commandOrPath, name) {
         }
     }
     else {
-        // No specific path, try the default command name (check system PATH)
         effectivePath = name;
         checkViaPath = true;
     }
-    // Attempt to run the command
     return new Promise((resolve) => {
         try {
             const proc = (0, node_child_process_1.spawn)(effectivePath, [versionArg], {
-                shell: process.platform === "win32", // Use shell on Windows for PATH resolution
+                shell: process.platform === "win32",
                 windowsHide: true,
             });
             let out = "";
@@ -82,17 +84,16 @@ async function checkCommand(commandOrPath, name) {
             proc.stderr.on("data", (d) => (errOut += d.toString()));
             proc.on("close", (code) => {
                 const info = (out || errOut).trim();
-                const ok = code === 0 && !!info; // Command executed successfully and produced output
+                const ok = code === 0 && !!info;
                 resolve({
                     ok,
-                    pathUsed: effectivePath, // Return the path that was actually tested
+                    pathUsed: effectivePath,
                     errorMsg: ok
                         ? undefined
                         : `Exit Code ${code}. Stderr: ${errOut.trim() || "(none)"}`,
                 });
             });
             proc.on("error", (err) => {
-                // This 'error' event usually means the command itself couldn't be found/spawned
                 resolve({
                     ok: false,
                     pathUsed: effectivePath,
@@ -101,7 +102,6 @@ async function checkCommand(commandOrPath, name) {
             });
         }
         catch (e) {
-            // Catch synchronous errors during spawn setup
             resolve({
                 ok: false,
                 pathUsed: effectivePath,
@@ -112,94 +112,79 @@ async function checkCommand(commandOrPath, name) {
 }
 async function checkAndStoreDependencies() {
     console.log("Starting dependency check...");
-    dependenciesStatus.checked = false; // Mark as checking
+    dependenciesStatus.checked = false;
     const ytDlpUserPath = store.get("ytDlpExecutablePath");
     const ffmpegUserPath = store.get("ffmpegExecutablePath");
-    // Check both dependencies concurrently
     const [ytDlpCheck, ffmpegCheck] = await Promise.all([
         checkCommand(ytDlpUserPath || "", "yt-dlp"),
         checkCommand(ffmpegUserPath || "", "ffmpeg"),
     ]);
-    // Update global status object
     dependenciesStatus = {
         ytDlpOk: ytDlpCheck.ok,
         ffmpegOk: ffmpegCheck.ok,
-        checked: true, // Mark check as complete
-        // Store the path that was successfully used, or the user's preference if check failed
+        checked: true,
         ytDlpPath: ytDlpCheck.ok ? ytDlpCheck.pathUsed : ytDlpUserPath || "yt-dlp",
         ffmpegPath: ffmpegCheck.ok
             ? ffmpegCheck.pathUsed
             : ffmpegUserPath || "ffmpeg",
     };
     console.log("Dependency check complete. Status:", dependenciesStatus);
-    // Send updated status to renderer
     if (win) {
         win.webContents.send("dependencies-status-update", dependenciesStatus);
     }
-    const allOk = dependenciesStatus.ytDlpOk; // && dependenciesStatus.ffmpegOk; // Only require yt-dlp for core functionality
+    const allOk = dependenciesStatus.ytDlpOk;
     if (!dependenciesStatus.ytDlpOk && win) {
-        // Show warning only if yt-dlp is missing
         console.warn("yt-dlp dependency missing or invalid");
     }
     else if (allOk) {
         console.log("Core dependency (yt-dlp) verified.");
     }
-    return allOk; // Return overall status based on yt-dlp primarily
+    return allOk;
 }
-// --- Helper: Format Size ---
 function formatBytes(bytes, decimals = 1) {
     if (bytes === undefined || bytes === null || bytes === 0)
         return "";
     const k = 1024;
     const dm = decimals < 0 ? 0 : decimals;
     const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
-    // Handle potential log(0) or negative bytes
     if (bytes <= 0)
         return "0 Bytes";
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    // Ensure index is within bounds
     const safeIndex = Math.min(i, sizes.length - 1);
     return `~${parseFloat((bytes / Math.pow(k, safeIndex)).toFixed(dm))}${sizes[safeIndex]}`;
 }
-// --- Helper: Create Label ---
 function createFormatLabel(f, type, bestAudioInfo) {
     const parts = [];
-    // Video Info
     if (type === "video" || type === "direct" || type === "combined") {
         if (f.height)
-            parts.push(f.height + "p"); // 1080p
+            parts.push(f.height + "p");
         if (f.fps && f.fps > 30)
             parts.push(`${Math.round(f.fps)}fps`);
         if (f.vcodec && f.vcodec !== "none")
             parts.push(f.vcodec.split(".")[0]);
-        // Add Video Bitrate if available and type is video-only
         if (type === "video" && f.vbr)
             parts.push(`~${Math.round(f.vbr)}k`);
         else if (type === "video" && f.tbr)
-            parts.push(`~${Math.round(f.tbr)}k`); // Fallback to tbr for video
+            parts.push(`~${Math.round(f.tbr)}k`);
     }
-    // Audio Info
     if (type === "audio" || type === "direct") {
         if (f.acodec && f.acodec !== "none")
             parts.push(f.acodec.split(".")[0]);
         if (f.abr)
             parts.push(`~${Math.round(f.abr)}k`);
     }
-    // Combined Audio Info (from bestAudioInfo)
     if (type === "combined" && bestAudioInfo?.acodec) {
         parts.push(`+${bestAudioInfo.acodec.split(".")[0]}`);
         if (bestAudioInfo.abr)
             parts.push(`~${Math.round(bestAudioInfo.abr)}k`);
     }
-    // Container Info
     if (type === "direct" || type === "video" || type === "audio") {
         if (f.ext)
             parts.push(`(${f.ext.toUpperCase()})`);
     }
     else if (type === "combined" && bestAudioInfo) {
-        parts.push(`(${f.ext}+${bestAudioInfo.ext})`); // Show both extensions
+        parts.push(`(${f.ext}+${bestAudioInfo.ext})`);
     }
-    // Filesize Info
     if (type === "direct" || type === "video" || type === "audio") {
         if (f.filesize || f.filesize_approx)
             parts.push(formatBytes(f.filesize ?? f.filesize_approx));
@@ -214,18 +199,14 @@ function createFormatLabel(f, type, bestAudioInfo) {
     }
     return parts.join(" ").trim();
 }
-// --- REFACTORED: parseAndCombineFormats (WITH LOGGING) ---
 function parseAndCombineFormats(rawFormats) {
     const results = [];
     if (!Array.isArray(rawFormats))
         return results;
-    // Filter out non-http protocols and formats without essential info
     const validFormats = rawFormats.filter((f) => f?.format_id &&
         f.protocol &&
         ["http", "https"].includes(f.protocol) &&
-        (f.vcodec !== "none" || f.acodec !== "none") // Must have video OR audio
-    );
-    // --- Filter and Sort Raw Formats ---
+        (f.vcodec !== "none" || f.acodec !== "none"));
     const videoOnlyFormats = validFormats
         .filter((f) => f.vcodec !== "none" && f.acodec === "none" && f.height)
         .sort((a, b) => (b.height ?? 0) - (a.height ?? 0) ||
@@ -242,15 +223,6 @@ function parseAndCombineFormats(rawFormats) {
         (b.fps ?? 0) - (a.fps ?? 0) ||
         (b.tbr ?? 0) - (a.tbr ?? 0) ||
         (b.preference ?? -99) - (a.preference ?? -99));
-    // --- START DEBUG LOGGING ---
-    console.log(`\n--- Parsing Formats ---`);
-    console.log(`[Formats Debug] Raw Count: ${rawFormats.length}`);
-    console.log(`[Formats Debug] Valid Count (HTTP(S), Has A/V): ${validFormats.length}`);
-    console.log(`[Formats Debug] VideoOnly Count: ${videoOnlyFormats.length}`);
-    console.log(`[Formats Debug] AudioOnly Count: ${audioOnlyFormats.length}`);
-    console.log(`[Formats Debug] DirectCombined Count: ${directCombinedFormats.length}`);
-    // --- END DEBUG LOGGING ---
-    // Find the best audio stream
     const bestAudio = audioOnlyFormats.find((f) => f.acodec?.startsWith("opus")) ||
         audioOnlyFormats[0];
     const bestAudioId = bestAudio?.format_id;
@@ -262,8 +234,6 @@ function parseAndCombineFormats(rawFormats) {
             filesize_approx: bestAudio.filesize_approx,
         }
         : undefined;
-    console.log(`[Formats Debug] Best Audio Selected: ${bestAudio ? bestAudio.format_id + " (" + bestAudio.acodec + ")" : "None"}`); // Log best audio
-    // --- Add "Best" Option ---
     results.push({
         id: "bestvideo+bestaudio/best",
         label: "Best Available (Recommended)",
@@ -273,7 +243,6 @@ function parseAndCombineFormats(rawFormats) {
         qualityRank: 10000,
     });
     const addedDirectKeys = new Set();
-    // --- Add Direct Combined Formats ---
     directCombinedFormats.forEach((f) => {
         const qualityKey = `${f.height}p${f.fps > 30 ? Math.round(f.fps) : ""}`;
         if (addedDirectKeys.has(qualityKey))
@@ -297,14 +266,11 @@ function parseAndCombineFormats(rawFormats) {
         });
         addedDirectKeys.add(qualityKey);
     });
-    console.log(`[Formats Debug] Added Direct Combined: ${results.filter((r) => r.group === "Video + Audio (Single File)").length} (Unique Res/FPS)`); // Log count
-    // --- Add Generated Combined Formats (Video + Best Audio) ---
-    let addedGeneratedCount = 0; // Counter for logging
     if (bestAudioId && bestAudioInfo) {
         videoOnlyFormats.forEach((f) => {
             const qualityKey = `${f.height}p${f.fps > 30 ? Math.round(f.fps) : ""}`;
             if (addedDirectKeys.has(qualityKey))
-                return; // Skip if direct exists
+                return;
             const combinedId = `${f.format_id}+${bestAudioId}`;
             results.push({
                 id: combinedId,
@@ -325,13 +291,9 @@ function parseAndCombineFormats(rawFormats) {
                     : undefined,
                 qualityRank: (f.height ?? 0) * 10 + (f.fps ?? 0) + (f.vbr ?? f.tbr ?? 0) / 1000,
             });
-            addedDirectKeys.add(qualityKey); // Also mark this key as added
-            addedGeneratedCount++; // Increment counter
+            addedDirectKeys.add(qualityKey);
         });
     }
-    console.log(`[Formats Debug] Added Generated Combined: ${addedGeneratedCount}`); // Log count
-    // --- Add Video Only Formats ---
-    let addedVideoOnlyCount = 0;
     videoOnlyFormats.forEach((f) => {
         results.push({
             id: f.format_id,
@@ -350,11 +312,7 @@ function parseAndCombineFormats(rawFormats) {
             filesize: f.filesize_approx ?? f.filesize,
             qualityRank: (f.height ?? 0) * 10 + (f.fps ?? 0) + (f.vbr ?? f.tbr ?? 0) / 1000,
         });
-        addedVideoOnlyCount++;
     });
-    console.log(`[Formats Debug] Added Video Only: ${addedVideoOnlyCount}`); // Log count
-    // --- Add Audio Only Formats ---
-    let addedAudioOnlyCount = 0;
     audioOnlyFormats.forEach((f) => {
         results.push({
             id: f.format_id,
@@ -373,10 +331,7 @@ function parseAndCombineFormats(rawFormats) {
             filesize: f.filesize_approx ?? f.filesize,
             qualityRank: f.abr ?? 0,
         });
-        addedAudioOnlyCount++;
     });
-    console.log(`[Formats Debug] Added Audio Only: ${addedAudioOnlyCount}`); // Log count
-    // --- Final Sorting ---
     const groupOrder = {
         "Best Quality": 0,
         "Video + Audio (Single File)": 1,
@@ -391,12 +346,6 @@ function parseAndCombineFormats(rawFormats) {
             return groupA - groupB;
         return (b.qualityRank ?? 0) - (a.qualityRank ?? 0);
     });
-    // --- More Debug Logging ---
-    console.log(`[Formats Debug] Final Result Count After Processing/Sorting: ${results.length}`);
-    // Log the groups of the first few items to verify sort order
-    // console.log(`[Formats Debug] Final Results Sample (Groups):`, results.slice(0, 10).map(r => r.group));
-    console.log(`--- Finished Parsing Formats ---\n`);
-    // --- End Debug Logging ---
     return results;
 }
 // ==================================
@@ -404,29 +353,41 @@ function parseAndCombineFormats(rawFormats) {
 // ==================================
 function createWindow() {
     const publicPath = process.env.VITE_PUBLIC ?? "";
-    // Assuming icon is in build dir for packaged app
-    const iconPath = path.join(__dirname, "../../build/icon.png");
+    const iconPath = path.join(__dirname, "../../build/icon.png"); // Adjust path if needed
     win = new electron_1.BrowserWindow({
         width: 1024,
         height: 768,
         minWidth: 800,
         minHeight: 600,
-        // Use icon only if it exists - provide fallbacks for dev if needed
         icon: fs.existsSync(iconPath)
             ? iconPath
             : path.join(publicPath, "electron-vite.svg"),
+        show: false,
+        frame: true, // Keep frame for Win/Linux
+        titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default", // Use hiddenInset on macOS
         webPreferences: {
             preload: path.join(__dirname, "preload.js"),
             nodeIntegration: false,
             contextIsolation: true,
             sandbox: false,
         },
-        show: false, // Don't show until ready
-        // Optional: Add title bar style for macOS
-        // titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     });
     win.once("ready-to-show", () => {
         win?.show();
+        // --- Check for updates after window is shown (only in packaged app) ---
+        if (electron_1.app.isPackaged) {
+            console.log("[AutoUpdate] App is packaged, initiating update check...");
+            // Delay check slightly to ensure app is fully ready
+            setTimeout(() => {
+                electron_updater_1.autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+                    console.error("[AutoUpdate] Error checking for updates:", err.message);
+                });
+            }, 5000); // Check 5 seconds after ready-to-show
+        }
+        else {
+            console.log("[AutoUpdate] Development mode, skipping update check.");
+        }
+        // --- End Update Check ---
     });
     win.webContents.on("did-finish-load", () => {
         win?.webContents.send("main-process-message", `Backend loaded: ${new Date().toLocaleString()}`);
@@ -443,9 +404,8 @@ function createWindow() {
     win.on("closed", () => {
         win = null;
     });
-    // Optional: Remove default menu
-    // Menu.setApplicationMenu(null);
 }
+// --- App Lifecycle Events ---
 electron_1.app.on("window-all-closed", () => {
     if (process.platform !== "darwin")
         electron_1.app.quit();
@@ -456,15 +416,65 @@ electron_1.app.on("activate", () => {
 });
 electron_1.app.whenReady().then(() => {
     createWindow();
-    setTimeout(checkAndStoreDependencies, 1500); // Delay initial check slightly
+    setTimeout(checkAndStoreDependencies, 1500);
+});
+// ==================================
+// --- AutoUpdater Event Handling ---
+// ==================================
+electron_updater_1.autoUpdater.logger = console; // Use console for basic logging
+// autoUpdater.logger.transports = { file: { level: 'info' }, console: { level: 'info' } }; // Mock levels if needed
+electron_updater_1.autoUpdater.on("checking-for-update", () => {
+    console.log("[AutoUpdate] Checking...");
+});
+electron_updater_1.autoUpdater.on("update-available", (info) => {
+    console.log("[AutoUpdate] Update available.", info);
+});
+electron_updater_1.autoUpdater.on("update-not-available", (info) => {
+    console.log("[AutoUpdate] Update not available.", info);
+});
+electron_updater_1.autoUpdater.on("error", (err) => {
+    console.error("[AutoUpdate] Error:", err.message);
+    if (win && !err.message.includes("net::ERR_")) {
+        electron_1.dialog.showErrorBox("Update Error", `Failed to check for updates: ${err.message}`);
+    }
+});
+electron_updater_1.autoUpdater.on("download-progress", (progressObj) => {
+    let msg = `DL ${Math.round(progressObj.percent)}% (${Math.round(progressObj.bytesPerSecond / 1024)} KB/s)`;
+    console.log(`[AutoUpdate] ${msg}`);
+    if (win)
+        win.webContents.send("update-download-progress", progressObj.percent);
+});
+electron_updater_1.autoUpdater.on("update-downloaded", (info) => {
+    console.log("[AutoUpdate] Update downloaded; will install now", info);
+    electron_1.dialog
+        .showMessageBox(win, {
+        type: "info",
+        title: "Update Ready",
+        message: `A new version (${info.version}) has been downloaded. Restart the application to apply the update?`,
+        buttons: ["Restart Now", "Later"],
+        defaultId: 0,
+        cancelId: 1,
+    })
+        .then((result) => {
+        if (result.response === 0) {
+            console.log("[AutoUpdate] Quitting and installing...");
+            electron_updater_1.autoUpdater.quitAndInstall();
+        }
+        else {
+            console.log("[AutoUpdate] User chose to install later.");
+        }
+    })
+        .catch((err) => {
+        console.error("[AutoUpdate] Error showing restart dialog:", err);
+    });
 });
 // ==================================
 // --- IPC Handlers ---------------
 // ==================================
-// --- Notification Handler (Optional: can be called from Renderer too) ---
+// --- Notification Handler ---
 electron_1.ipcMain.handle("app:show-notification", (_event, options) => {
     if (!electron_1.Notification.isSupported()) {
-        console.warn("Native notifications not supported on this system.");
+        console.warn("Notifications not supported.");
         return;
     }
     new electron_1.Notification({ title: options.title, body: options.body }).show();
@@ -502,23 +512,19 @@ electron_1.ipcMain.handle("settings:select-executable-path", async (_event, name
             store.set("ytDlpExecutablePath", selectedPath);
         else
             store.set("ffmpegExecutablePath", selectedPath);
-        await checkAndStoreDependencies(); // Re-check after setting path
+        await checkAndStoreDependencies();
         return selectedPath;
     }
     return null;
 });
 // --- Dependencies Handlers ---
-electron_1.ipcMain.handle("app:check-dependencies", async () => {
-    return await checkAndStoreDependencies();
-});
-electron_1.ipcMain.handle("app:get-dependencies-status", () => {
-    return dependenciesStatus;
-});
+electron_1.ipcMain.handle("app:check-dependencies", async () => await checkAndStoreDependencies());
+electron_1.ipcMain.handle("app:get-dependencies-status", () => dependenciesStatus);
 // --- Downloads: List & Actions ---
 electron_1.ipcMain.handle("downloads:get-list", () => {
     try {
         const history = store.get("downloadHistory", []);
-        const historyWithCheck = history.map((item) => {
+        return history.map((item) => {
             let exists = false;
             if (item.status === "completed" && item.path) {
                 try {
@@ -530,7 +536,6 @@ electron_1.ipcMain.handle("downloads:get-list", () => {
             }
             return { ...item, fileExists: !!exists };
         });
-        return historyWithCheck;
     }
     catch (e) {
         console.error("Error in get-list:", e);
@@ -582,7 +587,6 @@ electron_1.ipcMain.handle("downloads:remove-item", async (_event, itemId) => {
     }
 });
 electron_1.ipcMain.handle("downloads:copy-path", async (_event, filePath) => {
-    // Kept for completeness, but recommend renderer clipboard API
     if (!filePath)
         return false;
     try {
@@ -603,8 +607,6 @@ electron_1.ipcMain.handle("downloads:retry", async (event, itemId) => {
         if (!itemToRetry)
             return { success: false, message: "Item not found in history." };
         console.log(`Retrying download for ${itemToRetry.url} (ID: ${itemId})`);
-        // Re-trigger download with original URL. Quality might need re-selection by user
-        // in the UI if original format isn't stored/retrieved.
         return await electron_1.ipcMain.handle("yt:download", event, { url: itemToRetry.url });
     }
     catch (e) {
@@ -618,9 +620,9 @@ electron_1.ipcMain.handle("yt:fetch-formats", async (_event, url) => {
         await checkAndStoreDependencies();
     if (!dependenciesStatus.ytDlpOk)
         throw new Error("yt-dlp is required but missing or invalid.");
-    return new Promise((resolve, reject) => {
+    return new Promise(async (resolve, reject) => {
         const args = ["-J", "--flat-playlist", url];
-        console.log(`Fetching formats: ${dependenciesStatus.ytDlpPath} ${args.join(" ")}`);
+        console.log(`Fetching formats & info: ${dependenciesStatus.ytDlpPath} ${args.join(" ")}`);
         const proc = (0, node_child_process_1.spawn)(dependenciesStatus.ytDlpPath, args, {
             windowsHide: true,
         });
@@ -632,14 +634,21 @@ electron_1.ipcMain.handle("yt:fetch-formats", async (_event, url) => {
             if (code === 0 && jsonData) {
                 try {
                     const info = JSON.parse(jsonData);
-                    const formats = info.formats || info.entries?.[0]?.formats;
+                    const videoInfo = info.entries ? info.entries[0] : info;
+                    const formats = videoInfo?.formats;
+                    const thumbnailUrl = videoInfo?.thumbnail;
+                    const title = videoInfo?.title;
                     if (!formats) {
                         if (info.entries)
                             throw new Error("Playlist detected, format fetching for playlists not fully supported.");
                         else
                             throw new Error("No video/format information found.");
                     }
-                    resolve(parseAndCombineFormats(formats)); // Use the updated parser
+                    resolve({
+                        formats: parseAndCombineFormats(formats),
+                        thumbnailUrl: thumbnailUrl,
+                        title: title,
+                    });
                 }
                 catch (e) {
                     console.error("Format JSON Parse Error:", e, "\nRaw JSON:", jsonData.substring(0, 1000));
@@ -677,13 +686,47 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
         electron_1.dialog.showErrorBox("Dependencies Error", msg);
         return { success: false, message: msg };
     }
-    // 2. Prepare Paths and Initial State
+    // 2. Fetch Info & Prepare State
+    let videoInfo = {};
+    try {
+        console.log(`[Download ${options.url}] Fetching video info...`);
+        const infoArgs = ["-J", "--flat-playlist", options.url];
+        const infoProc = (0, node_child_process_1.spawn)(dependenciesStatus.ytDlpPath, infoArgs, {
+            windowsHide: true,
+        });
+        let infoJsonData = "";
+        infoProc.stdout.on("data", (d) => (infoJsonData += d.toString()));
+        await new Promise((resolve, reject) => {
+            infoProc.on("close", (code) => {
+                if (code === 0 && infoJsonData) {
+                    try {
+                        const parsed = JSON.parse(infoJsonData);
+                        const entry = parsed.entries ? parsed.entries[0] : parsed;
+                        videoInfo.title = entry?.title;
+                        videoInfo.thumbnail = entry?.thumbnail;
+                        console.log(`[Download ${options.url}] Got info.`);
+                        resolve();
+                    }
+                    catch (e) {
+                        reject(new Error("Failed to parse video info JSON"));
+                    }
+                }
+                else {
+                    reject(new Error(`yt-dlp info fetch failed with code ${code}`));
+                }
+            });
+            infoProc.on("error", reject);
+        });
+    }
+    catch (error) {
+        console.error(`[Download ${options.url}] Failed to fetch video info: ${error.message}`);
+    }
     const baseDir = store.get("downloadPath", electron_1.app.getPath("downloads"));
     const targetDir = path.join(baseDir, YTD_SUBFOLDER);
     const videoId = options.url.includes("v=")
         ? options.url.split("v=")[1].split("&")[0]
         : `dl_${Date.now()}`;
-    const eventSender = _event.sender;
+    const eventSender = _event ? _event.sender : win?.webContents;
     try {
         fs.mkdirSync(targetDir, { recursive: true });
     }
@@ -692,13 +735,12 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
         electron_1.dialog.showErrorBox("Directory Error", msg);
         return { success: false, message: msg };
     }
-    // Add/Update item in history as 'pending'
     try {
         const history = store.get("downloadHistory", []);
         const existingItemIndex = history.findIndex((i) => i.id === videoId);
         const pendingItem = {
             id: videoId,
-            title: `Pending: ${options.url.substring(0, 60)}...`,
+            title: videoInfo.title || `Pending: ${options.url.substring(0, 60)}...`,
             path: "",
             status: "pending",
             url: options.url,
@@ -706,12 +748,13 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
             timestamp: Date.now(),
             fileExists: false,
             errorInfo: undefined,
+            thumbnailUrl: videoInfo.thumbnail,
         };
         let updatedHistory = existingItemIndex > -1
             ? history.map((item, index) => index === existingItemIndex ? pendingItem : item)
             : [...history, pendingItem];
         store.set("downloadHistory", updatedHistory);
-        eventSender.send("downloads:updated");
+        eventSender?.send("downloads:updated");
     }
     catch (e) {
         console.error(`Error setting pending state for ${videoId}:`, e);
@@ -727,10 +770,6 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
         path.join(targetDir, "%(title)s [%(id)s].%(ext)s"),
         "--no-continue",
         "--no-overwrites",
-        // Optional args:
-        // "--sponsorblock-mark", "all",
-        // "--write-thumbnail",
-        // "--embed-metadata", // Embed basic metadata
     ];
     if (needsFfmpeg)
         args.push("--ffmpeg-location", dependenciesStatus.ffmpegPath);
@@ -755,8 +794,7 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
         const proc = (0, node_child_process_1.spawn)(dependenciesStatus.ytDlpPath, args, {
             windowsHide: true,
         });
-        let stdoutBuffer = "", stderrBuffer = "", detectedTitle = `DL ${videoId}`, finalPath = "";
-        // --- stdout processing ---
+        let stdoutBuffer = "", stderrBuffer = "", detectedTitle = videoInfo.title || `DL ${videoId}`, finalPath = "";
         proc.stdout.on("data", (data) => {
             stdoutBuffer += data.toString();
             let newlineIndex;
@@ -767,7 +805,7 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
                     continue;
                 const progressMatch = line.match(/^progress:(\d+\.?\d*)%$/);
                 if (progressMatch?.[1]) {
-                    eventSender.send("yt:download-progress", {
+                    eventSender?.send("yt:download-progress", {
                         videoId,
                         progress: parseFloat(progressMatch[1]),
                     });
@@ -787,10 +825,8 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
                     console.log(`[DL ${videoId}] Detected Path: ${finalPath}, Title: ${detectedTitle}`);
                     updateStoreItemTitle(videoId, detectedTitle);
                 }
-                // console.log(`[stdout ${videoId}]: ${line}`); // Uncomment for detailed logs
             }
         });
-        // --- stderr processing ---
         proc.stderr.on("data", (data) => {
             const line = data.toString().trim();
             if (line) {
@@ -798,7 +834,6 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
                 stderrBuffer += line + "\n";
             }
         });
-        // --- 'close' event ---
         proc.on("close", (code) => {
             console.log(`[close ${videoId}] Code: ${code}, Path: ${finalPath || "(none)"}`);
             let fileExists = false;
@@ -809,7 +844,12 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
                 catch (e) { }
             }
             const status = code === 0 && fileExists ? "completed" : "error";
-            const finalTitle = status === "completed" ? detectedTitle : `Failed: ${detectedTitle}`;
+            const finalTitle = (status === "completed"
+                ? detectedTitle
+                : `Failed: ${detectedTitle}`) ||
+                (status === "completed"
+                    ? videoInfo.title
+                    : `Failed: ${videoInfo.title || videoId}`);
             const errorInfo = code !== 0
                 ? stderrBuffer.trim() || `yt-dlp exited with code ${code}`
                 : !fileExists
@@ -823,6 +863,7 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
                 timestamp: Date.now(),
                 errorInfo: errorInfo,
                 fileExists: fileExists,
+                thumbnailUrl: videoInfo.thumbnail,
             });
             if (electron_1.Notification.isSupported()) {
                 if (status === "completed")
@@ -839,7 +880,6 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
                     }).show();
             }
         });
-        // --- 'error' event ---
         proc.on("error", (err) => {
             console.error(`[spawn error ${videoId}]:`, err);
             const errorInfo = `Failed to start yt-dlp: ${err.message}`;
@@ -850,6 +890,7 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
                 errorInfo,
                 timestamp: Date.now(),
                 fileExists: false,
+                thumbnailUrl: videoInfo.thumbnail,
             });
             if (electron_1.Notification.isSupported())
                 new electron_1.Notification({ title: "Download Error", body: errorInfo }).show();
@@ -861,7 +902,6 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
         };
     }
     catch (e) {
-        // Catch synchronous spawn errors
         console.error(`[Sync spawn error ${videoId}]:`, e);
         const errorInfo = `Failed to launch download process: ${e.message}`;
         updateStoreItemFinal(videoId, {
@@ -871,11 +911,115 @@ electron_1.ipcMain.handle("yt:download", async (_event, options) => {
             errorInfo,
             timestamp: Date.now(),
             fileExists: false,
+            thumbnailUrl: videoInfo.thumbnail,
         });
         if (electron_1.Notification.isSupported())
             new electron_1.Notification({ title: "Launch Error", body: errorInfo }).show();
         return { success: false, message: errorInfo };
     }
+});
+// --- NEW: yt:fetch-playlist-videos Handler ---
+electron_1.ipcMain.handle("yt:fetch-playlist-videos", async (_event, playlistUrl) => {
+    if (!dependenciesStatus.checked)
+        await checkAndStoreDependencies();
+    if (!dependenciesStatus.ytDlpOk)
+        throw new Error("yt-dlp is required.");
+    return new Promise((resolve, reject) => {
+        const args = ["--flat-playlist", "-J", playlistUrl];
+        console.log(`Fetching playlist videos: ${dependenciesStatus.ytDlpPath} ${args.join(" ")}`);
+        const proc = (0, node_child_process_1.spawn)(dependenciesStatus.ytDlpPath, args, {
+            windowsHide: true,
+        });
+        let jsonData = "";
+        let errData = "";
+        proc.stdout.on("data", (d) => (jsonData += d.toString()));
+        proc.stderr.on("data", (d) => (errData += d.toString()));
+        proc.on("close", (code) => {
+            if (code === 0 && jsonData) {
+                try {
+                    const info = JSON.parse(jsonData);
+                    if (!info.entries || !Array.isArray(info.entries)) {
+                        if (info.id && info.title) {
+                            reject(new Error("This appears to be a single video URL, not a playlist."));
+                            return;
+                        }
+                        throw new Error("Invalid playlist data received from yt-dlp.");
+                    }
+                    const items = info.entries.map((entry) => ({
+                        id: entry.id,
+                        url: entry.url,
+                        title: entry.title || `Video ${entry.id}`,
+                        thumbnail: entry.thumbnail,
+                    }));
+                    console.log(`Fetched ${items.length} videos from playlist.`);
+                    resolve(items);
+                }
+                catch (e) {
+                    console.error("Playlist JSON Parse Error:", e, "\nRaw JSON:", jsonData.substring(0, 1000));
+                    reject(new Error(`Failed to parse playlist info: ${e.message}. stderr: ${errData.trim()}`));
+                }
+            }
+            else {
+                console.error(`yt-dlp playlist fetch failed (code ${code}): ${errData.trim()}`);
+                reject(new Error(`yt-dlp failed (code ${code}): ${errData.trim() || "Playlist not found or private?"}`));
+            }
+        });
+        proc.on("error", (e) => {
+            console.error(`yt-dlp spawn error for playlist fetch: ${e.message}`);
+            reject(e);
+        });
+    });
+});
+// --- Helper function to trigger single download (extracted for reuse) ---
+async function triggerSingleDownload(item, options) {
+    const singleDownloadOptions = {
+        // Use 'any' temporarily if DownloadOptions is strict
+        url: item.url,
+        formatCode: options.formatCode,
+        outputFormat: options.outputFormat,
+        hasVideo: options.hasVideo,
+        hasAudio: options.hasAudio,
+    };
+    console.log(`Triggering download for playlist item: ${item.url}`);
+    try {
+        // Pass a dummy event object (null). Handler logic updated to check eventSender presence.
+        const result = await electron_1.ipcMain.handle("yt:download", null, singleDownloadOptions);
+        return result;
+    }
+    catch (error) {
+        console.error(`Error triggering download for ${item.url}:`, error);
+        return {
+            success: false,
+            message: `Failed to start download for ${item.url}: ${error.message}`,
+        };
+    }
+}
+// --- NEW: yt:download-playlist-items Handler ---
+electron_1.ipcMain.handle("yt:download-playlist-items", async (_event, items, options) => {
+    if (!items || items.length === 0) {
+        return {
+            success: false,
+            message: "No playlist items selected for download.",
+        };
+    }
+    console.log(`Received request to download ${items.length} playlist items with options:`, options);
+    let successes = 0;
+    let failures = 0;
+    // Simple Sequential Loop (Replace with queue/concurrency later if needed)
+    for (const item of items) {
+        const result = await triggerSingleDownload(item, options);
+        if (result.success) {
+            successes++;
+        }
+        else {
+            failures++;
+            console.warn(`Failed playlist item ${item.id}: ${result.message}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500)); // Small delay between starts
+    }
+    const message = `Playlist download initiated: ${successes} started successfully, ${failures} failed to start.`;
+    console.log(message);
+    return { success: failures === 0, message };
 });
 // --- Helper functions for store updates ---
 function updateStoreItemFinal(videoId, finalData) {
@@ -885,11 +1029,10 @@ function updateStoreItemFinal(videoId, finalData) {
         const updatedHistory = history.map((item) => {
             if (item.id === videoId) {
                 itemFound = true;
-                return { ...item, ...finalData }; // Merge new data
+                return { ...item, ...finalData };
             }
             return item;
         });
-        // If somehow the item wasn't in the list (e.g., pending state failed), add it now.
         if (!itemFound) {
             console.warn(`Item ${videoId} not found in history during final update, adding.`);
             const minimalItem = {
@@ -904,7 +1047,7 @@ function updateStoreItemFinal(videoId, finalData) {
         }
         store.set("downloadHistory", updatedHistory);
         if (win)
-            win.webContents.send("downloads:updated"); // Notify UI
+            win.webContents.send("downloads:updated");
         console.log(`[Store ${videoId}] Final status (${finalData.status}) updated.`);
     }
     catch (e) {
@@ -916,7 +1059,6 @@ function updateStoreItemTitle(videoId, title) {
         const history = store.get("downloadHistory", []);
         const updatedHistory = history.map((item) => item.id === videoId ? { ...item, title: title } : item);
         store.set("downloadHistory", updatedHistory);
-        // No UI update needed just for title detection usually
     }
     catch (e) { }
 }

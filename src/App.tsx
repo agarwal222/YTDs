@@ -12,8 +12,7 @@ import type {
   DownloadResult,
   ProgressData,
   DependenciesStatus,
-} from "../electron/preload"
-// Removed ScrollArea import
+} from "../electron/preload" // Types from preload
 
 function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
@@ -27,6 +26,10 @@ function App() {
     ffmpegPath: undefined,
   })
   const dependenciesOkForDownload = !!(depStatus.checked && depStatus.ytDlpOk)
+  const [updateDownloadPercent, setUpdateDownloadPercent] = useState<
+    number | null
+  >(null) // State for update progress
+
   const { toast } = useToast()
 
   // --- Callbacks and Effects ---
@@ -68,9 +71,7 @@ function App() {
       return
     }
 
-    console.log(
-      "App: API ready. Setting up listeners and performing initial checks..."
-    )
+    console.log("App: API ready. Setting up listeners and initial checks...")
     setLoadingDownloads(true)
 
     // --- Setup Listeners ---
@@ -104,13 +105,27 @@ function App() {
         console.log("App: Message from Main:", message)
       }
     )
+    // Auto Update Progress Listener
+    let removeUpdateProgressListener: (() => void) | undefined
+    if (window.electronAPI?.onUpdateDownloadProgress) {
+      removeUpdateProgressListener =
+        window.electronAPI.onUpdateDownloadProgress((percent) => {
+          console.log(`App: Update progress: ${percent}%`)
+          setUpdateDownloadPercent(percent)
+          // Reset progress if it hits 100 or an error occurs elsewhere (handled by app restart/main process)
+          if (percent >= 100) {
+            setTimeout(() => setUpdateDownloadPercent(null), 2000) // Clear after a delay
+          }
+        })
+    } else {
+      console.warn("onUpdateDownloadProgress API not available")
+    }
 
     // --- Perform Initial Checks ---
     const performInitialLoad = async () => {
       try {
         console.log("App: Performing initial fetchDownloads()...")
         await fetchDownloads()
-
         console.log("App: Performing initial getDependenciesStatus()...")
         const initialStatus = await window.electronAPI.getDependenciesStatus()
         setDepStatus(initialStatus)
@@ -135,7 +150,6 @@ function App() {
         setLoadingDownloads(false)
       }
     }
-
     performInitialLoad()
 
     // --- Cleanup Function ---
@@ -145,6 +159,7 @@ function App() {
       removeProgressListener?.()
       removeDepListener?.()
       removeMainMessageListener?.()
+      removeUpdateProgressListener?.() // Cleanup update listener
     }
   }, [fetchDownloads, toast])
 
@@ -156,7 +171,7 @@ function App() {
   const handleRemoveItem = async (itemId: string) => {
     console.log(`App: Requesting removal of item ${itemId}`)
     if (!window.electronAPI?.removeItem) {
-      console.error("App: removeItem function not available on electronAPI.")
+      console.error("App: removeItem function not available.")
       toast({
         title: "Error",
         description: "Cannot remove item: Feature not available.",
@@ -184,7 +199,6 @@ function App() {
       })
     }
   }
-
   const handleOpenFolder = async (filePath: string | undefined) => {
     console.log(`App: Requesting to open folder for: ${filePath}`)
     if (!filePath) {
@@ -196,9 +210,7 @@ function App() {
       return
     }
     if (!window.electronAPI?.openItemFolder) {
-      console.error(
-        "App: openItemFolder function not available on electronAPI."
-      )
+      console.error("App: openItemFolder function not available.")
       toast({
         title: "Error",
         description: "Cannot open folder: Feature not available.",
@@ -224,11 +236,10 @@ function App() {
       })
     }
   }
-
   const handleRetryDownload = async (item: DownloadItem) => {
     console.log(`App: Requesting retry for item ${item.id} - URL: ${item.url}`)
     if (!window.electronAPI?.retryDownload) {
-      console.error("App: retryDownload function not available on electronAPI.")
+      console.error("App: retryDownload function not available.")
       toast({
         title: "Error",
         description: "Cannot retry download: Feature not available.",
@@ -259,15 +270,10 @@ function App() {
       })
     }
   }
-  // --- End Action Handlers ---
 
   return (
-    // Main container div
     <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden antialiased">
-      {/* Top Bar */}
       <TopBar onSettingsClick={() => setIsSettingsOpen(true)} />
-
-      {/* Inline New Download Form */}
       <NewDownloadForm
         dependenciesOk={dependenciesOkForDownload}
         onDownloadStarted={handleDownloadStarted}
@@ -299,12 +305,10 @@ function App() {
         ytDlpOk={depStatus.ytDlpOk}
         ffmpegOk={depStatus.ffmpegOk}
         checked={depStatus.checked}
+        updateProgress={updateDownloadPercent} // Pass down state
       />
 
-      {/* Settings Modal */}
       <SettingsModal isOpen={isSettingsOpen} onOpenChange={setIsSettingsOpen} />
-
-      {/* Toast Container */}
       <Toaster />
     </div>
   )
