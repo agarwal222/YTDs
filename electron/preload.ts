@@ -66,10 +66,10 @@ export interface DependenciesStatus {
 
 // --- Playlist Item Type ---
 export interface PlaylistItem {
-  id: string
-  url: string
-  title: string
-  thumbnail?: string
+  id: string // Video ID
+  url: string // Video URL
+  title: string // Video Title
+  thumbnail?: string // Thumbnail URL
 }
 // --- Playlist Download Options Type ---
 export interface PlaylistDownloadOptions {
@@ -123,6 +123,11 @@ export interface ElectronAPI {
 
   // Auto Update Progress Listener
   onUpdateDownloadProgress: (callback: (percent: number) => void) => () => void
+
+  // --- NEW: Window Control Methods ---
+  windowMinimize: () => void
+  windowToggleMaximize: () => void // Toggles between maximize and restore
+  windowClose: () => void
 
   // Other
   onMainProcessMessage: (callback: (message: string) => void) => () => void
@@ -186,6 +191,11 @@ const electronAPI: ElectronAPI = {
     return () =>
       ipcRenderer.removeListener("update-download-progress", listener)
   },
+
+  // --- NEW: Window Control Implementations ---
+  windowMinimize: () => ipcRenderer.invoke("window:minimize"),
+  windowToggleMaximize: () => ipcRenderer.invoke("window:toggle-maximize"),
+  windowClose: () => ipcRenderer.invoke("window:close"),
 
   // Other
   onMainProcessMessage: (callback) => {

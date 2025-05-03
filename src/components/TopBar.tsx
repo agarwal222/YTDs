@@ -1,32 +1,41 @@
 // src/components/TopBar.tsx
 import { Button } from "@/components/ui/button"
-import { Settings } from "lucide-react"
-import { cn } from "@/lib/utils" // Import cn
+import { Settings, Minus, Square, X } from "lucide-react" // Import new icons
+import { cn } from "@/lib/utils"
+import React from "react" // Import React for CSSProperties typing
 
 interface TopBarProps {
   onSettingsClick: () => void
 }
 
 function TopBar({ onSettingsClick }: TopBarProps) {
-  // Check if running on macOS (This is a renderer-side check, reasonably reliable for styling)
-  // Note: A more robust way might involve getting platform info via IPC if needed for logic.
+  // Check if running on macOS
   const isMac = navigator.userAgent.toUpperCase().includes("MAC")
+
+  // --- Window Control Handlers ---
+  const handleMinimize = () => {
+    window.electronAPI?.windowMinimize()
+  }
+  const handleMaximize = () => {
+    window.electronAPI?.windowToggleMaximize()
+  }
+  const handleClose = () => {
+    window.electronAPI?.windowClose()
+  }
+  // --- End Handlers ---
 
   return (
     <header
       className={cn(
         "flex items-center justify-between border-b border-border h-14 flex-shrink-0 bg-background",
-        // Add more left padding only on Mac to avoid traffic lights
-        // Adjust the padding value (e.g., pl-20) if needed based on your UI
-        isMac ? "pl-[76px]" : "px-3", // Keep right padding consistent or adjust as needed
-        "py-2" // Keep vertical padding
+        // Still need padding for macOS traffic lights with titleBarStyle:'hidden'
+        isMac ? "pl-[76px]" : "pl-3 pr-1", // Adjust non-mac padding
+        "py-2"
       )}
-      // Apply the draggable style. This style is only interpreted by Electron.
-      // Use type assertion because TypeScript doesn't know about -webkit-app-region by default.
+      // Header area is draggable
       style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
     >
-      {/* Title - Make sure it's NOT draggable */}
-      {/* Apply no-drag ONLY to interactive elements within the drag region */}
+      {/* Title - Non-draggable */}
       <h1
         className="text-lg font-semibold"
         style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
@@ -34,21 +43,65 @@ function TopBar({ onSettingsClick }: TopBarProps) {
         YT Downloader
       </h1>
 
-      {/* Button Container - Make sure it's NOT draggable */}
+      {/* Right Aligned Controls Area - Non-draggable */}
       <div
-        className="flex gap-2 pr-1" // Add slight right padding if needed
+        className="flex gap-1 items-center"
         style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
       >
+        {/* Settings Button */}
         <Button
-          variant="ghost" // Use ghost for less emphasis maybe? Or keep outline.
+          variant="ghost"
           size="icon"
           onClick={onSettingsClick}
           title="Settings"
-          // Buttons inside a no-drag region are clickable by default
+          className="h-8 w-8"
         >
-          <Settings className="h-5 w-5" />
+          <Settings className="h-4 w-4" />
           <span className="sr-only">Settings</span>
         </Button>
+
+        {/* --- Custom Window Controls (Windows/Linux Only) --- */}
+        {!isMac && (
+          <div className="flex items-center ml-2">
+            {" "}
+            {/* Add margin */}
+            {/* Minimize */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleMinimize}
+              title="Minimize"
+              className="h-8 w-8 hover:bg-muted/80"
+            >
+              <Minus className="h-4 w-4" />
+              <span className="sr-only">Minimize</span>
+            </Button>
+            {/* Maximize/Restore */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleMaximize}
+              title="Maximize"
+              className="h-8 w-8 hover:bg-muted/80"
+            >
+              {/* Use Square icon for now, could change based on state later */}
+              <Square className="h-[14px] w-[14px]" />
+              <span className="sr-only">Maximize</span>
+            </Button>
+            {/* Close */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleClose}
+              title="Close"
+              className="h-8 w-8 hover:bg-destructive/80 hover:text-destructive-foreground"
+            >
+              <X className="h-4 w-4" />
+              <span className="sr-only">Close</span>
+            </Button>
+          </div>
+        )}
+        {/* --- End Custom Window Controls --- */}
       </div>
     </header>
   )

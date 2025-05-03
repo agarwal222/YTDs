@@ -811,7 +811,8 @@ if (!gotTheLock) {
         : path.join(publicPath, "electron-vite.svg"),
       show: false,
       frame: true,
-      titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
+      // titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
+      titleBarStyle: "hidden",
       webPreferences: {
         preload: path.join(__dirname, "preload.js"),
         nodeIntegration: false,
@@ -1288,4 +1289,33 @@ if (!gotTheLock) {
       return { success: failures === 0, message }
     }
   )
+
+  ipcMain.handle("window:minimize", () => {
+    const currentWindow = BrowserWindow.getFocusedWindow() // Or use global 'win' if always targeting main window
+    if (currentWindow) {
+      currentWindow.minimize()
+    }
+  })
+
+  ipcMain.handle("window:toggle-maximize", () => {
+    const currentWindow = BrowserWindow.getFocusedWindow() // Or use global 'win'
+    if (currentWindow) {
+      if (currentWindow.isMaximized()) {
+        currentWindow.unmaximize()
+      } else {
+        currentWindow.maximize()
+      }
+      // Optionally: Send state back to renderer if needed for icon changes
+      // currentWindow.webContents.send('window-state-change', currentWindow.isMaximized());
+    }
+  })
+
+  ipcMain.handle("window:close", () => {
+    const currentWindow = BrowserWindow.getFocusedWindow() // Or use global 'win'
+    if (currentWindow) {
+      currentWindow.close() // Standard close action
+    } else {
+      app.quit() // Fallback if no focused window
+    }
+  })
 } // <--- Correct END of the 'else' block for the single instance lock
