@@ -1,7 +1,7 @@
 {
   "name": "ytds",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.2.0",
   "description": "A YouTube Downloader App",
   "author": "Your Name",
   "main": "dist-electron/main.js",
@@ -9,7 +9,7 @@
     "dev:vite": "vite",
     "dev:main": "tsc -p electron/tsconfig.json -w",
     "start:electron": "cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
-    "dev": "concurrently -k \"pnpm dev:vite\" \"pnpm dev:main\" \"wait-on tcp:5173 && pnpm start:electron\"",
+    "dev": "concurrently --kill-others success -k \"pnpm dev:vite\" \"pnpm dev:main\" \"wait-on tcp:5173 && pnpm start:electron\"",
     "build:vite": "vite build",
     "build:main": "tsc -p electron/tsconfig.json",
     "build": "pnpm build:main && pnpm build:vite",

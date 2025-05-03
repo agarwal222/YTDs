@@ -6,13 +6,16 @@ export interface DownloadItem {
   id: string
   title: string
   path: string
-  status: "pending" | "downloading" | "completed" | "error"
+  status: "pending" | "downloading" | "completed" | "error" | "cancelled" // Added 'cancelled' status
   url: string
   progress?: number
   timestamp?: number
   fileExists?: boolean
   errorInfo?: string
-  thumbnailUrl?: string // Added thumbnail URL
+  thumbnailUrl?: string
+  logPath?: string // Path to the log file
+  originalFormatCode?: string // For faster retry
+  originalOutputFormat?: string // For faster retry
 }
 export interface DetailedFormat {
   id: string
@@ -66,10 +69,10 @@ export interface DependenciesStatus {
 
 // --- Playlist Item Type ---
 export interface PlaylistItem {
-  id: string // Video ID
-  url: string // Video URL
-  title: string // Video Title
-  thumbnail?: string // Thumbnail URL
+  id: string
+  url: string
+  title: string
+  thumbnail?: string
 }
 // --- Playlist Download Options Type ---
 export interface PlaylistDownloadOptions {
@@ -91,8 +94,10 @@ export interface ElectronAPI {
   onDownloadsUpdated: (callback: () => void) => () => void
   openItemFolder: (filePath: string) => Promise<boolean>
   removeItem: (itemId: string) => Promise<boolean>
-  copyItemPath: (filePath: string) => Promise<boolean>
+  copyItemPath: (filePath: string) => Promise<boolean> // Kept but maybe unused
   retryDownload: (itemId: string) => Promise<DownloadResult>
+  viewLog: (logPath: string | undefined) => Promise<boolean> // View log file
+  cancelDownload: (videoId: string) => Promise<boolean> // Cancel active download
 
   // YouTube Actions
   fetchFormats: (
@@ -101,13 +106,11 @@ export interface ElectronAPI {
     formats: DetailedFormat[]
     thumbnailUrl?: string
     title?: string
-  }> // For single video info
-  downloadVideo: (options: DownloadOptions) => Promise<DownloadResult> // For single video download
+  }>
+  downloadVideo: (options: DownloadOptions) => Promise<DownloadResult>
   onDownloadProgress: (
     callback: (progressData: ProgressData) => void
-  ) => () => void // Listener for download progress
-
-  // --- Playlist Handlers ---
+  ) => () => void
   fetchPlaylistVideos: (playlistUrl: string) => Promise<PlaylistItem[]>
   downloadPlaylistItems: (
     items: PlaylistItem[],
@@ -124,9 +127,9 @@ export interface ElectronAPI {
   // Auto Update Progress Listener
   onUpdateDownloadProgress: (callback: (percent: number) => void) => () => void
 
-  // --- NEW: Window Control Methods ---
+  // Window Controls
   windowMinimize: () => void
-  windowToggleMaximize: () => void // Toggles between maximize and restore
+  windowToggleMaximize: () => void
   windowClose: () => void
 
   // Other
@@ -155,6 +158,9 @@ const electronAPI: ElectronAPI = {
   copyItemPath: (filePath) =>
     ipcRenderer.invoke("downloads:copy-path", filePath),
   retryDownload: (itemId) => ipcRenderer.invoke("downloads:retry", itemId),
+  viewLog: (logPath) => ipcRenderer.invoke("downloads:view-log", logPath),
+  cancelDownload: (videoId) =>
+    ipcRenderer.invoke("yt:cancel-download", videoId),
 
   // YouTube Actions
   fetchFormats: (url) => ipcRenderer.invoke("yt:fetch-formats", url),
@@ -165,8 +171,6 @@ const electronAPI: ElectronAPI = {
     ipcRenderer.on("yt:download-progress", listener)
     return () => ipcRenderer.removeListener("yt:download-progress", listener)
   },
-
-  // Playlist Implementations
   fetchPlaylistVideos: (playlistUrl) =>
     ipcRenderer.invoke("yt:fetch-playlist-videos", playlistUrl),
   downloadPlaylistItems: (items, options) =>
@@ -192,7 +196,7 @@ const electronAPI: ElectronAPI = {
       ipcRenderer.removeListener("update-download-progress", listener)
   },
 
-  // --- NEW: Window Control Implementations ---
+  // Window Controls
   windowMinimize: () => ipcRenderer.invoke("window:minimize"),
   windowToggleMaximize: () => ipcRenderer.invoke("window:toggle-maximize"),
   windowClose: () => ipcRenderer.invoke("window:close"),

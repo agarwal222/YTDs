@@ -38,14 +38,19 @@ function App() {
     try {
       if (window.electronAPI) {
         const list = await window.electronAPI.getDownloads()
-        console.log("App: Received downloads list:", list.length, "items")
-        setDownloadList(Array.isArray(list) ? list : [])
+        if (Array.isArray(list)) {
+          console.log("App: Received downloads list:", list.length, "items") // Log length only if it's an array
+          setDownloadList(list)
+        } else {
+          console.error("App: Received non-array data from getDownloads:", list)
+          setDownloadList([]) // Set to empty array if backend returns unexpected data
+        }
       } else {
         console.error("App: electronAPI not available for fetching downloads.")
         setDownloadList([])
       }
     } catch (error: any) {
-      console.error("App: Failed to fetch downloads:", error)
+      console.error("App: Failed to fetch downloads (API Error):", error)
       toast({
         title: "Error Loading Downloads",
         description: error?.message || "Could not load download history.",
@@ -112,10 +117,9 @@ function App() {
         window.electronAPI.onUpdateDownloadProgress((percent) => {
           console.log(`App: Update progress: ${percent}%`)
           setUpdateDownloadPercent(percent)
-          // Reset progress if it hits 100 or an error occurs elsewhere (handled by app restart/main process)
           if (percent >= 100) {
-            setTimeout(() => setUpdateDownloadPercent(null), 2000) // Clear after a delay
-          }
+            setTimeout(() => setUpdateDownloadPercent(null), 2000)
+          } // Clear after a delay
         })
     } else {
       console.warn("onUpdateDownloadProgress API not available")
@@ -270,6 +274,72 @@ function App() {
       })
     }
   }
+  const handleCancelDownload = async (itemId: string) => {
+    console.log(`App: Requesting cancel for item ${itemId}`)
+    if (!window.electronAPI?.cancelDownload) {
+      toast({
+        title: "Error",
+        description: "Cancel feature not available.",
+        variant: "destructive",
+      })
+      return
+    }
+    try {
+      const success = await window.electronAPI.cancelDownload(itemId)
+      if (success) {
+        toast({ description: "Sent cancel request." })
+      } else {
+        toast({
+          title: "Cancel Failed",
+          description: "Could not send cancel signal or process not found.",
+          variant: "warning",
+        })
+      }
+    } catch (error: any) {
+      console.error("App: Error cancelling download:", error)
+      toast({
+        title: "Cancel Error",
+        description: error.message || "Could not cancel download.",
+        variant: "destructive",
+      })
+    }
+  }
+  const handleViewLog = async (logPath: string | undefined) => {
+    console.log(`App: Requesting view log: ${logPath}`)
+    if (!logPath) {
+      toast({
+        title: "Error",
+        description: "No log path available for this item.",
+        variant: "destructive",
+      })
+      return
+    }
+    if (!window.electronAPI?.viewLog) {
+      toast({
+        title: "Error",
+        description: "View log feature not available.",
+        variant: "destructive",
+      })
+      return
+    }
+    try {
+      const success = await window.electronAPI.viewLog(logPath)
+      if (!success) {
+        toast({
+          title: "Could Not Open Log",
+          description: "Log file might be missing or inaccessible.",
+          variant: "warning",
+        })
+      }
+    } catch (error: any) {
+      console.error("App: Error viewing log:", error)
+      toast({
+        title: "Error Viewing Log",
+        description: error.message || "Could not open log file.",
+        variant: "destructive",
+      })
+    }
+  }
 
   return (
     <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden antialiased">
@@ -295,6 +365,8 @@ function App() {
             onRemoveItem={handleRemoveItem}
             onOpenFolder={handleOpenFolder}
             onRetry={handleRetryDownload}
+            onCancel={handleCancelDownload} // Pass down cancel handler
+            onViewLog={handleViewLog} // Pass down view log handler
           />
         )}
       </div>
@@ -305,7 +377,7 @@ function App() {
         ytDlpOk={depStatus.ytDlpOk}
         ffmpegOk={depStatus.ffmpegOk}
         checked={depStatus.checked}
-        updateProgress={updateDownloadPercent} // Pass down state
+        updateProgress={updateDownloadPercent}
       />
 
       <SettingsModal isOpen={isSettingsOpen} onOpenChange={setIsSettingsOpen} />

@@ -14,27 +14,26 @@ import path = require("node:path")
 import ElectronStore from "electron-store"
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process"
 import fs = require("node:fs")
-// Optional: Setup a proper logger like electron-log
-// import log from 'electron-log/main';
-// autoUpdater.logger = log;
-// autoUpdater.logger.transports.file.level = 'info';
-// log.info('App starting...');
 
 // --- Constants ---
 const YTD_SUBFOLDER = "YTDs"
+const LOG_SUBFOLDER = "logs"
 
 // --- Type Definitions ---
 interface DownloadItem {
   id: string
   title: string
   path: string
-  status: "pending" | "downloading" | "completed" | "error"
+  status: "pending" | "downloading" | "completed" | "error" | "cancelled"
   url: string
   progress?: number
   timestamp?: number
   fileExists?: boolean
   errorInfo?: string
   thumbnailUrl?: string
+  logPath?: string
+  originalFormatCode?: string
+  originalOutputFormat?: string
 }
 interface DetailedFormat {
   id: string
@@ -99,6 +98,7 @@ let dependenciesStatus = {
   ytDlpPath: "yt-dlp",
   ffmpegPath: "ffmpeg",
 }
+let activeDownloads = new Map<string, ChildProcessWithoutNullStreams>()
 
 // --- Path Calculations ---
 process.env.DIST = path.join(__dirname, "../dist")
@@ -185,7 +185,6 @@ async function checkCommand(
     }
   })
 }
-
 async function checkAndStoreDependencies(): Promise<boolean> {
   console.log("Starting dependency check...")
   dependenciesStatus.checked = false
@@ -216,7 +215,6 @@ async function checkAndStoreDependencies(): Promise<boolean> {
   }
   return allOk
 }
-
 function formatBytes(bytes: number | undefined | null, decimals = 1): string {
   if (bytes === undefined || bytes === null || bytes === 0) return ""
   const k = 1024
@@ -229,7 +227,6 @@ function formatBytes(bytes: number | undefined | null, decimals = 1): string {
     sizes[safeIndex]
   }`
 }
-
 function createFormatLabel(
   f: any,
   type: "direct" | "video" | "audio" | "combined",
@@ -268,7 +265,6 @@ function createFormatLabel(
   }
   return parts.join(" ").trim()
 }
-
 function parseAndCombineFormats(rawFormats: any[]): DetailedFormat[] {
   const results: DetailedFormat[] = []
   if (!Array.isArray(rawFormats)) return results
@@ -459,52 +455,77 @@ async function executeDownloadLogic(
     return { success: false, message: msg }
   }
 
-  // 2. Fetch Info & Prepare State
-  let videoInfo: { title?: string; thumbnail?: string } = {}
-  try {
-    console.log(`[Download ${options.url}] Fetching video info...`)
-    const infoArgs = ["-J", "--flat-playlist", options.url]
-    const infoProc = spawn(dependenciesStatus.ytDlpPath, infoArgs, {
-      windowsHide: true,
-    })
-    let infoJsonData = ""
-    infoProc.stdout.on("data", (d) => (infoJsonData += d.toString()))
-    await new Promise<void>((resolve, reject) => {
-      infoProc.on("close", (code) => {
-        if (code === 0 && infoJsonData) {
-          try {
-            const parsed = JSON.parse(infoJsonData)
-            const entry = parsed.entries ? parsed.entries[0] : parsed
-            videoInfo.title = entry?.title
-            videoInfo.thumbnail = entry?.thumbnail
-            console.log(`[Download ${options.url}] Got info.`)
-            resolve()
-          } catch (e) {
-            reject(new Error("Failed to parse video info JSON"))
-          }
-        } else {
-          reject(new Error(`yt-dlp info fetch failed with code ${code}`))
-        }
-      })
-      infoProc.on("error", reject)
-    })
-  } catch (error: any) {
-    console.error(
-      `[Download ${options.url}] Failed to fetch video info: ${error.message}`
-    )
-  }
+  // 2. Prepare Paths and Initial State
   const baseDir: string = store.get("downloadPath", app.getPath("downloads"))
+  const logDir = path.join(baseDir, LOG_SUBFOLDER) // Define log directory
   const targetDir = path.join(baseDir, YTD_SUBFOLDER)
   const videoId = options.url.includes("v=")
     ? options.url.split("v=")[1].split("&")[0]
     : `dl_${Date.now()}`
+  const logPath = path.join(logDir, `${videoId}.log`) // Define specific log file path
+
+  // Ensure directories exist
   try {
     fs.mkdirSync(targetDir, { recursive: true })
+    fs.mkdirSync(logDir, { recursive: true })
   } catch (e: any) {
-    const msg = `Cannot create download directory: ${targetDir}\nError: ${e.message}`
+    const msg = `Cannot create download/log directory: ${e.message}`
     dialog.showErrorBox("Directory Error", msg)
     return { success: false, message: msg }
   }
+
+  // Fetch Info (Only if needed)
+  let videoInfo: { title?: string; thumbnail?: string } = {}
+  const needsInfoFetch =
+    !options.formatCode ||
+    options.formatCode === "bestvideo+bestaudio/best" ||
+    !store.get("downloadHistory", []).find((i) => i.id === videoId)
+      ?.originalFormatCode
+  if (needsInfoFetch) {
+    try {
+      console.log(`[Download ${options.url}] Fetching video info...`)
+      const infoArgs = ["-J", "--flat-playlist", options.url]
+      const infoProc = spawn(dependenciesStatus.ytDlpPath, infoArgs, {
+        windowsHide: true,
+      })
+      let infoJsonData = ""
+      infoProc.stdout.on("data", (d) => (infoJsonData += d.toString()))
+      await new Promise<void>((resolve, reject) => {
+        infoProc.on("close", (code) => {
+          if (code === 0 && infoJsonData) {
+            try {
+              const parsed = JSON.parse(infoJsonData)
+              const entry = parsed.entries ? parsed.entries[0] : parsed
+              videoInfo.title = entry?.title
+              videoInfo.thumbnail = entry?.thumbnail
+              console.log(`[Download ${options.url}] Got info.`)
+              resolve()
+            } catch (e) {
+              reject(new Error("Failed to parse video info JSON"))
+            }
+          } else {
+            reject(new Error(`yt-dlp info fetch failed with code ${code}`))
+          }
+        })
+        infoProc.on("error", reject)
+      })
+    } catch (error: any) {
+      console.error(
+        `[Download ${options.url}] Failed to fetch video info: ${error.message}`
+      )
+    }
+  } else {
+    console.log(
+      `[Download ${options.url}] Skipping info fetch for retry with format.`
+    )
+    const existingItem = store
+      .get("downloadHistory", [])
+      .find((i) => i.id === videoId)
+    videoInfo.title = existingItem?.title
+    videoInfo.thumbnail = existingItem?.thumbnailUrl
+  }
+
+  // Add/Update item in history as 'pending'
   try {
     const history = store.get("downloadHistory", [] as DownloadItem[])
     const existingItemIndex = history.findIndex((i) => i.id === videoId)
@@ -519,6 +540,9 @@ async function executeDownloadLogic(
       fileExists: false,
       errorInfo: undefined,
       thumbnailUrl: videoInfo.thumbnail,
+      logPath: logPath,
+      originalFormatCode: options.formatCode,
+      originalOutputFormat: options.outputFormat,
     }
     let updatedHistory: DownloadItem[] =
       existingItemIndex > -1
@@ -568,16 +592,45 @@ async function executeDownloadLogic(
   )
 
   // 4. Spawn yt-dlp Process and Handle Events
+  let logStream: fs.WriteStream | null = null // Declare outside try
   try {
+    try {
+      logStream = fs.createWriteStream(logPath, { flags: "a" })
+      logStream.write(
+        `\n===== Download Started: ${new Date().toISOString()} =====\n`
+      )
+      logStream.write(
+        `Command: ${dependenciesStatus.ytDlpPath} ${args
+          .map((a) => (a.includes(" ") ? `"${a}"` : a))
+          .join(" ")}\n`
+      )
+      logStream.write(
+        `------------------------------------------------------\n`
+      )
+    } catch (logErr: any) {
+      console.error(
+        `[Download ${videoId}] Failed to create log stream: ${logErr.message}`
+      )
+      logStream = null
+    }
+
     const proc = spawn(dependenciesStatus.ytDlpPath, args, {
       windowsHide: true,
     })
+    activeDownloads.set(videoId, proc)
+    console.log(
+      `[Process Track] Added ${videoId}. Active: ${activeDownloads.size}`
+    )
+
     let stdoutBuffer = "",
       stderrBuffer = "",
       detectedTitle = videoInfo.title || `DL ${videoId}`,
       finalPath = ""
+
     proc.stdout.on("data", (data) => {
-      stdoutBuffer += data.toString()
+      const chunk = data.toString()
+      stdoutBuffer += chunk
+      logStream?.write(chunk)
       let newlineIndex
       while ((newlineIndex = stdoutBuffer.indexOf("\n")) >= 0) {
         const line = stdoutBuffer.substring(0, newlineIndex).trim()
@@ -612,64 +665,102 @@ async function executeDownloadLogic(
       }
     })
     proc.stderr.on("data", (data) => {
-      const line = data.toString().trim()
+      const chunk = data.toString()
+      stderrBuffer += chunk
+      logStream?.write(`[stderr] ${chunk}`)
+      const line = chunk.trim()
       if (line) {
         console.error(`[stderr ${videoId}]: ${line}`)
-        stderrBuffer += line + "\n"
       }
     })
-    proc.on("close", (code) => {
+
+    proc.on("close", (code, signal) => {
+      activeDownloads.delete(videoId)
       console.log(
-        `[close ${videoId}] Code: ${code}, Path: ${finalPath || "(none)"}`
+        `[Process Track] Removed ${videoId} on close. Active: ${activeDownloads.size}`
       )
+      console.log(
+        `[close ${videoId}] Code: ${code}, Signal: ${signal}, Path: ${
+          finalPath || "(none)"
+        }`
+      )
+      logStream?.write(
+        `\n===== Process Exited: ${new Date().toISOString()} Code: ${code}, Signal: ${signal} =====\n`
+      )
+      logStream?.end()
       let fileExists = false
       if (finalPath) {
         try {
           fileExists = fs.existsSync(finalPath)
         } catch (e) {}
       }
-      const status: DownloadItem["status"] =
-        code === 0 && fileExists ? "completed" : "error"
+      let finalStatus: DownloadItem["status"] = "error"
+      let finalErrorInfo: string | undefined =
+        stderrBuffer.trim() || `yt-dlp exited with code ${code}` // Explicit type
+      if (signal === "SIGTERM") {
+        finalStatus = "cancelled"
+        finalErrorInfo = "Download cancelled by user."
+      } else if (code === 0 && fileExists) {
+        finalStatus = "completed"
+        finalErrorInfo = undefined
+      } // Now valid
+      else if (!fileExists && code === 0) {
+        finalStatus = "error"
+        finalErrorInfo = `Output file missing or undetected: ${
+          finalPath || "(path unknown)"
+        }`
+      }
       const finalTitle =
-        (status === "completed" ? detectedTitle : `Failed: ${detectedTitle}`) ||
-        (status === "completed"
+        (finalStatus === "completed"
+          ? detectedTitle
+          : `Failed: ${detectedTitle}`) ||
+        (finalStatus === "completed"
           ? videoInfo.title
           : `Failed: ${videoInfo.title || videoId}`)
-      const errorInfo =
-        code !== 0
-          ? stderrBuffer.trim() || `yt-dlp exited with code ${code}`
-          : !fileExists
-          ? `Output file missing or undetected: ${
-              finalPath || "(path unknown)"
-            }`
-          : undefined
       updateStoreItemFinal(videoId, {
         title: finalTitle,
-        path: status === "completed" ? finalPath : "",
-        status,
-        progress: status === "completed" ? 100 : undefined,
+        path: finalStatus === "completed" ? finalPath : "",
+        status: finalStatus,
+        progress: finalStatus === "completed" ? 100 : undefined,
         timestamp: Date.now(),
-        errorInfo: errorInfo,
+        errorInfo: finalErrorInfo,
         fileExists: fileExists,
         thumbnailUrl: videoInfo.thumbnail,
+        logPath: logPath,
       })
       if (Notification.isSupported()) {
-        if (status === "completed")
+        if (finalStatus === "completed")
           new Notification({
             title: "Download Complete",
             body: finalTitle,
           }).show()
-        else if (status === "error")
+        else if (finalStatus === "error")
           new Notification({
             title: "Download Failed",
-            body: errorInfo
-              ? `${finalTitle}: ${errorInfo.substring(0, 100)}`
+            body: finalErrorInfo
+              ? `${finalTitle}: ${finalErrorInfo.substring(0, 100)}`
               : finalTitle,
+          }).show()
+        else if (finalStatus === "cancelled")
+          new Notification({
+            title: "Download Cancelled",
+            body: finalTitle,
           }).show()
       }
     })
+
     proc.on("error", (err) => {
+      activeDownloads.delete(videoId)
+      console.log(
+        `[Process Track] Removed ${videoId} on error. Active: ${activeDownloads.size}`
+      )
       console.error(`[spawn error ${videoId}]:`, err)
+      logStream?.write(
+        `\n===== Spawn Error: ${new Date().toISOString()} ${
+          err.message
+        } =====\n`
+      )
+      logStream?.end() // Use safe access
       const errorInfo = `Failed to start yt-dlp: ${err.message}`
       updateStoreItemFinal(videoId, {
         title: "Spawn Error",
@@ -679,17 +770,26 @@ async function executeDownloadLogic(
         timestamp: Date.now(),
         fileExists: false,
         thumbnailUrl: videoInfo.thumbnail,
+        logPath: logPath,
       })
       if (Notification.isSupported())
         new Notification({ title: "Download Error", body: errorInfo }).show()
     })
+
     return {
       success: true,
       message: "Download process initiated.",
       videoId: videoId,
     }
   } catch (e: any) {
+    // Catch synchronous spawn errors
     console.error(`[Sync spawn error ${videoId}]:`, e)
+    logStream?.write(
+      `\n===== Sync Spawn Error: ${new Date().toISOString()} ${
+        e.message
+      } =====\n`
+    )
+    logStream?.end() // Use safe access
     const errorInfo = `Failed to launch download process: ${e.message}`
     updateStoreItemFinal(videoId, {
       title: "Launch Error",
@@ -699,6 +799,7 @@ async function executeDownloadLogic(
       timestamp: Date.now(),
       fileExists: false,
       thumbnailUrl: videoInfo.thumbnail,
+      logPath: logPath,
     })
     if (Notification.isSupported())
       new Notification({ title: "Launch Error", body: errorInfo }).show()
@@ -780,12 +881,14 @@ function updateStoreItemTitle(videoId: string, title: string) {
 }
 
 // ==================================
-// --- Single Instance Lock ---
+// --- Single Instance Lock & App Setup ---
 // ==================================
 const gotTheLock = app.requestSingleInstanceLock()
 
 if (!gotTheLock) {
-  console.log("Another instance is already running. Quitting this instance.")
+  console.error(
+    "<<<<< Another instance is already running. Quitting this second instance NOW. >>>>>"
+  ) // Add explicit log
   app.quit()
 } else {
   // This is the primary instance.
@@ -811,7 +914,6 @@ if (!gotTheLock) {
         : path.join(publicPath, "electron-vite.svg"),
       show: false,
       frame: true,
-      // titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
       titleBarStyle: "hidden",
       webPreferences: {
         preload: path.join(__dirname, "preload.js"),
@@ -851,7 +953,6 @@ if (!gotTheLock) {
       win = null
     })
   }
-
   app.whenReady().then(() => {
     createWindow()
     setTimeout(checkAndStoreDependencies, 1500)
@@ -859,7 +960,6 @@ if (!gotTheLock) {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
   })
-
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit()
   })
@@ -917,16 +1017,13 @@ if (!gotTheLock) {
   // ==================================
   // --- IPC Handlers Setup (Primary Instance) ---
   // ==================================
-  ipcMain.handle(
-    "app:show-notification",
-    (_event, options: { title: string; body: string }) => {
-      if (!Notification.isSupported()) {
-        console.warn("Notifications not supported.")
-        return
-      }
-      new Notification({ title: options.title, body: options.body }).show()
+  ipcMain.handle("app:show-notification", (_event, options) => {
+    if (!Notification.isSupported()) {
+      console.warn("Notifications not supported.")
+      return
     }
-  )
+    new Notification({ title: options.title, body: options.body }).show()
+  })
   ipcMain.handle("settings:get-paths", () => ({
     downloadPath: store.get("downloadPath", app.getPath("downloads")),
     ytDlpPath: store.get("ytDlpExecutablePath", ""),
@@ -945,24 +1042,21 @@ if (!gotTheLock) {
     }
     return store.get("downloadPath", app.getPath("downloads"))
   })
-  ipcMain.handle(
-    "settings:select-executable-path",
-    async (_event, name: "yt-dlp" | "ffmpeg") => {
-      if (!win) return null
-      const result = await dialog.showOpenDialog(win, {
-        properties: ["openFile"],
-        title: `Select ${name} Executable`,
-      })
-      if (!result.canceled && result.filePaths.length > 0) {
-        const selectedPath = result.filePaths[0]
-        if (name === "yt-dlp") store.set("ytDlpExecutablePath", selectedPath)
-        else store.set("ffmpegExecutablePath", selectedPath)
-        await checkAndStoreDependencies()
-        return selectedPath
-      }
-      return null
+  ipcMain.handle("settings:select-executable-path", async (_event, name) => {
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      properties: ["openFile"],
+      title: `Select ${name} Executable`,
+    })
+    if (!result.canceled && result.filePaths.length > 0) {
+      const selectedPath = result.filePaths[0]
+      if (name === "yt-dlp") store.set("ytDlpExecutablePath", selectedPath)
+      else store.set("ffmpegExecutablePath", selectedPath)
+      await checkAndStoreDependencies()
+      return selectedPath
     }
-  )
+    return null
+  })
   ipcMain.handle(
     "app:check-dependencies",
     async () => await checkAndStoreDependencies()
@@ -974,7 +1068,7 @@ if (!gotTheLock) {
       const history = store.get("downloadHistory", [] as DownloadItem[])
       if (!Array.isArray(history)) {
         console.error(
-          "[IPC downloads:get-list] Error: History retrieved from store is not an array:",
+          "[IPC downloads:get-list] Error: History not an array:",
           history
         )
         store.set("downloadHistory", [])
@@ -989,7 +1083,7 @@ if (!gotTheLock) {
           !item.status
         ) {
           console.warn(
-            "[IPC downloads:get-list] Filtering out invalid item from history:",
+            "[IPC downloads:get-list] Filtering out invalid item:",
             item
           )
           return false
@@ -1022,7 +1116,7 @@ if (!gotTheLock) {
       return []
     }
   })
-  ipcMain.handle("downloads:open-folder", async (_event, filePath: string) => {
+  ipcMain.handle("downloads:open-folder", async (_event, filePath) => {
     if (!filePath) return false
     try {
       if (!fs.existsSync(filePath)) {
@@ -1047,7 +1141,7 @@ if (!gotTheLock) {
       return false
     }
   })
-  ipcMain.handle("downloads:remove-item", async (_event, itemId: string) => {
+  ipcMain.handle("downloads:remove-item", async (_event, itemId) => {
     if (!itemId) return false
     try {
       const history = store.get("downloadHistory", [])
@@ -1063,7 +1157,7 @@ if (!gotTheLock) {
       return false
     }
   })
-  ipcMain.handle("downloads:copy-path", async (_event, filePath: string) => {
+  ipcMain.handle("downloads:copy-path", async (_event, filePath) => {
     if (!filePath) return false
     try {
       clipboard.writeText(path.normalize(filePath))
@@ -1075,7 +1169,7 @@ if (!gotTheLock) {
   })
   ipcMain.handle(
     "downloads:retry",
-    async (_event, itemId: string): Promise<DownloadResult> => {
+    async (_event, itemId): Promise<DownloadResult> => {
       if (!itemId) return { success: false, message: "Invalid ID." }
       try {
         const history = store.get("downloadHistory", [])
@@ -1083,7 +1177,12 @@ if (!gotTheLock) {
         if (!itemToRetry)
           return { success: false, message: "Item not found in history." }
         console.log(`Retrying download for ${itemToRetry.url} (ID: ${itemId})`)
-        return await executeDownloadLogic({ url: itemToRetry.url })
+        const retryOptions: DownloadOptions = {
+          url: itemToRetry.url,
+          formatCode: itemToRetry.originalFormatCode,
+          outputFormat: itemToRetry.originalOutputFormat,
+        }
+        return await executeDownloadLogic(retryOptions)
       } catch (e: any) {
         console.error(`Failed to retry item ${itemId}:`, e)
         return { success: false, message: `Retry error: ${e.message}` }
@@ -1094,7 +1193,7 @@ if (!gotTheLock) {
     "yt:fetch-formats",
     async (
       _event,
-      url: string
+      url
     ): Promise<{
       formats: DetailedFormat[]
       thumbnailUrl?: string
@@ -1180,7 +1279,7 @@ if (!gotTheLock) {
   )
   ipcMain.handle(
     "yt:fetch-playlist-videos",
-    async (_event, playlistUrl: string): Promise<PlaylistItem[]> => {
+    async (_event, playlistUrl): Promise<PlaylistItem[]> => {
       if (!dependenciesStatus.checked) await checkAndStoreDependencies()
       if (!dependenciesStatus.ytDlpOk) throw new Error("yt-dlp is required.")
       return new Promise<PlaylistItem[]>((resolve, reject) => {
@@ -1259,8 +1358,8 @@ if (!gotTheLock) {
     "yt:download-playlist-items",
     async (
       _event,
-      items: PlaylistItem[],
-      options: PlaylistDownloadOptions
+      items,
+      options
     ): Promise<{ success: boolean; message: string }> => {
       if (!items || items.length === 0) {
         return {
@@ -1289,33 +1388,73 @@ if (!gotTheLock) {
       return { success: failures === 0, message }
     }
   )
-
   ipcMain.handle("window:minimize", () => {
-    const currentWindow = BrowserWindow.getFocusedWindow() // Or use global 'win' if always targeting main window
-    if (currentWindow) {
-      currentWindow.minimize()
-    }
+    const cw = BrowserWindow.getFocusedWindow()
+    if (cw) cw.minimize()
   })
-
   ipcMain.handle("window:toggle-maximize", () => {
-    const currentWindow = BrowserWindow.getFocusedWindow() // Or use global 'win'
-    if (currentWindow) {
-      if (currentWindow.isMaximized()) {
-        currentWindow.unmaximize()
+    const cw = BrowserWindow.getFocusedWindow()
+    if (cw) {
+      if (cw.isMaximized()) {
+        cw.unmaximize()
       } else {
-        currentWindow.maximize()
+        cw.maximize()
       }
-      // Optionally: Send state back to renderer if needed for icon changes
-      // currentWindow.webContents.send('window-state-change', currentWindow.isMaximized());
     }
   })
-
   ipcMain.handle("window:close", () => {
-    const currentWindow = BrowserWindow.getFocusedWindow() // Or use global 'win'
-    if (currentWindow) {
-      currentWindow.close() // Standard close action
+    const cw = BrowserWindow.getFocusedWindow()
+    if (cw) {
+      cw.close()
     } else {
-      app.quit() // Fallback if no focused window
+      app.quit()
     }
   })
+  ipcMain.handle(
+    "downloads:view-log",
+    async (_event, logPath: string | undefined): Promise<boolean> => {
+      if (!logPath) {
+        dialog.showErrorBox("Error", "Log path missing.")
+        return false
+      }
+      try {
+        if (!fs.existsSync(logPath)) {
+          dialog.showErrorBox(
+            "Log Not Found",
+            `Log file not found:\n${logPath}`
+          )
+          return false
+        }
+        await shell.openPath(logPath)
+        return true
+      } catch (e: any) {
+        dialog.showErrorBox(
+          "Error Opening Log",
+          `Could not open log file: ${e.message}`
+        )
+        return false
+      }
+    }
+  )
+  ipcMain.handle(
+    "yt:cancel-download",
+    async (_event, videoId: string): Promise<boolean> => {
+      if (!videoId) return false
+      const proc = activeDownloads.get(videoId)
+      if (proc) {
+        console.log(`[Cancel] Attempting kill ${videoId}`)
+        const killed = proc.kill("SIGTERM")
+        if (killed) {
+          console.log(`[Cancel] SIGTERM sent to ${videoId}.`)
+          return true
+        } else {
+          console.error(`[Cancel] Failed to send SIGTERM to ${videoId}.`)
+          return false
+        }
+      } else {
+        console.warn(`[Cancel] No active process for ${videoId}.`)
+        return false
+      }
+    }
+  )
 } // <--- Correct END of the 'else' block for the single instance lock

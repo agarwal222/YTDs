@@ -9,12 +9,14 @@ import {
   Hourglass,
   FolderOpen,
   Trash2,
+  XCircle, // Added XCircle for Cancel
   RotateCcw,
   Copy,
   Link as LinkIcon,
   FileQuestion,
   ExternalLink,
-  ImageOff, // Add ImageOff
+  ImageOff,
+  FileText, // Added FileText for Log
 } from "lucide-react"
 import type { DownloadItem } from "../../electron/preload"
 import {
@@ -31,6 +33,9 @@ interface DownloadListProps {
   onRemoveItem: (itemId: string) => void
   onOpenFolder: (filePath: string | undefined) => void
   onRetry: (item: DownloadItem) => void
+  // Add new props for cancel/log actions handled in App.tsx
+  onCancel: (itemId: string) => void
+  onViewLog: (logPath: string | undefined) => void
 }
 
 function DownloadList({
@@ -38,8 +43,20 @@ function DownloadList({
   onRemoveItem,
   onOpenFolder,
   onRetry,
+  onCancel,
+  onViewLog,
 }: DownloadListProps) {
   const { toast } = useToast()
+
+  if (!Array.isArray(downloads) || downloads.length === 0) {
+    // You might want a slightly different message if it's undefined vs empty,
+    // but for simplicity, the "No downloads" message works for both initial load states.
+    return (
+      <p className="text-muted-foreground px-4 py-10 text-sm text-center">
+        No downloads yet. Add one above.
+      </p>
+    )
+  }
 
   // Helper to render status icon and text
   const renderStatus = (
@@ -98,6 +115,15 @@ function DownloadList({
           text: "Error",
           shortLabel: "Error",
         }
+      case "cancelled":
+        return {
+          icon: (
+            <XCircle className="h-3.5 w-3.5 mr-1.5 text-muted-foreground shrink-0" />
+          ),
+          textClass: "text-muted-foreground",
+          text: "Cancelled",
+          shortLabel: "Stop",
+        } // New Cancelled Status
       default:
         return {
           icon: (
@@ -150,6 +176,10 @@ function DownloadList({
           .map((item) => {
             const isCompleted = item.status === "completed"
             const isError = item.status === "error"
+            const isCancelled = item.status === "cancelled"
+            const isDownloading = item.status === "downloading"
+            const isPending = item.status === "pending"
+            const isActive = isDownloading || isPending // Determine if cancel should be shown
             const canInteractWithPath =
               isCompleted && !!item.fileExists && !!item.path
             const displayTitle = item.title || `Video ID: ${item.id}`
@@ -159,7 +189,7 @@ function DownloadList({
               <li
                 key={item.id}
                 className={cn(
-                  "group relative w-full text-left border-b border-border flex flex-row items-stretch", // Use items-stretch
+                  "group relative w-full text-left border-b border-border flex flex-row items-stretch",
                   "transition-colors duration-150 hover:bg-muted/50",
                   canInteractWithPath ? "cursor-pointer" : "cursor-default"
                 )}
@@ -174,63 +204,52 @@ function DownloadList({
                     : displayTitle
                 }
               >
-                {/* --- Thumbnail Column --- */}
+                {/* Thumbnail Column */}
                 <div className="flex-shrink-0 w-24 p-2 hidden sm:block">
-                  {" "}
-                  {/* Fixed width, hidden on small screens */}
                   <div className="w-full aspect-video rounded border bg-secondary overflow-hidden relative">
-                    {" "}
-                    {/* Aspect ratio container */}
                     {item.thumbnailUrl ? (
                       <img
                         src={item.thumbnailUrl}
                         alt="Thumbnail"
-                        className="absolute inset-0 w-full h-full object-cover transition-opacity duration-300" // Use absolute positioning
+                        className="absolute inset-0 w-full h-full object-cover transition-opacity duration-300"
                         loading="lazy"
                         onError={(e) => {
-                          // Hide img and show placeholder sibling on error
                           const img = e.target as HTMLImageElement
-                          img.style.opacity = "0" // Fade out smoothly
+                          img.style.opacity = "0"
                           img.style.pointerEvents = "none"
                           const placeholder = img.nextElementSibling
                           if (placeholder)
                             (placeholder as HTMLElement).style.opacity = "1"
                         }}
                         onLoad={(e) => {
-                          // Ensure image is visible on load
                           ;(e.target as HTMLImageElement).style.opacity = "1"
                         }}
-                        style={{ opacity: 0 }} // Start hidden, fade in on load
+                        style={{ opacity: 0 }}
                       />
                     ) : null}
-                    {/* Placeholder always present but shown based on img error/load */}
                     <div
                       className={cn(
                         "absolute inset-0 w-full h-full flex items-center justify-center bg-secondary transition-opacity duration-300",
-                        item.thumbnailUrl ? "opacity-0" : "opacity-100" // Show if no URL
+                        item.thumbnailUrl ? "opacity-0" : "opacity-100"
                       )}
                     >
-                      <ImageOff className="w-5 h-5 text-muted-foreground" />
+                      {" "}
+                      <ImageOff className="w-5 h-5 text-muted-foreground" />{" "}
                     </div>
                   </div>
                 </div>
-                {/* --- End Thumbnail Column --- */}
 
                 {/* Main Item Content Area */}
                 <div className="flex-grow flex flex-col gap-1 overflow-hidden py-3 pl-3 pr-1 sm:pl-0">
-                  {" "}
-                  {/* Adjust padding for thumb */}
-                  {/* Title */}
                   <p
                     className={cn(
                       "text-sm font-medium leading-tight truncate",
-                      isError ? "text-destructive" : ""
+                      isError || isCancelled ? "text-destructive/80" : ""
                     )}
                   >
                     {" "}
                     {displayTitle}{" "}
                   </p>
-                  {/* Status Icon/Text */}
                   <div
                     className={cn(
                       "text-xs truncate flex items-center",
@@ -239,7 +258,7 @@ function DownloadList({
                   >
                     {statusDetails.icon}
                     <span className="ml-0.5">{statusDetails.text}</span>
-                    {isError && item.errorInfo && (
+                    {(isError || isCancelled) && item.errorInfo && (
                       <span
                         className="ml-1.5 text-muted-foreground truncate"
                         title={item.errorInfo}
@@ -251,17 +270,15 @@ function DownloadList({
                       </span>
                     )}
                   </div>
-                  {/* Progress Bar */}
-                  {item.status === "downloading" &&
-                    typeof item.progress === "number" && (
-                      <div className="mt-1.5">
-                        {" "}
-                        <Progress
-                          value={item.progress}
-                          className="h-1 w-full"
-                        />{" "}
-                      </div>
-                    )}
+                  {isDownloading && typeof item.progress === "number" && (
+                    <div className="mt-1.5">
+                      {" "}
+                      <Progress
+                        value={item.progress}
+                        className="h-1 w-full"
+                      />{" "}
+                    </div>
+                  )}
                 </div>
 
                 {/* Action Buttons Area */}
@@ -272,7 +289,26 @@ function DownloadList({
                     "transition-opacity duration-150"
                   )}
                 >
-                  {/* Buttons */}
+                  {/* Cancel Button (Conditional) */}
+                  {isActive && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-destructive/90 hover:bg-destructive/10"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onCancel(item.id)
+                          }}
+                        >
+                          <XCircle className="h-4 w-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>Cancel Download</TooltipContent>
+                    </Tooltip>
+                  )}
+                  {/* Open Folder Button (Conditional) */}
                   {canInteractWithPath && (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -291,6 +327,7 @@ function DownloadList({
                       <TooltipContent>Open Folder</TooltipContent>
                     </Tooltip>
                   )}
+                  {/* Copy Path Button (Conditional) */}
                   {canInteractWithPath && (
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -309,6 +346,7 @@ function DownloadList({
                       <TooltipContent>Copy Path</TooltipContent>
                     </Tooltip>
                   )}
+                  {/* Copy URL Button */}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -325,7 +363,27 @@ function DownloadList({
                     </TooltipTrigger>
                     <TooltipContent>Copy URL</TooltipContent>
                   </Tooltip>
-                  {isError && (
+                  {/* View Log Button (Show if log path exists) */}
+                  {item.logPath && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            onViewLog(item.logPath)
+                          }}
+                        >
+                          <FileText className="h-4 w-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>View Log</TooltipContent>
+                    </Tooltip>
+                  )}
+                  {/* Retry Button (Conditional) */}
+                  {(isError || isCancelled) && (
                     <Tooltip>
                       <TooltipTrigger asChild>
                         <Button
@@ -343,6 +401,7 @@ function DownloadList({
                       <TooltipContent>Retry</TooltipContent>
                     </Tooltip>
                   )}
+                  {/* Remove Button */}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
